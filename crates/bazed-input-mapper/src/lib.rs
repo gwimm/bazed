@@ -16,6 +16,7 @@ use nonempty::NonEmpty;
 pub mod input_event;
 pub mod key_combo;
 pub mod keymap;
+pub mod input_pattern;
 
 /// Id of a keymap.
 ///
