@@ -206,7 +206,7 @@ macro_rules! def_list {
         }
         impl $pat_name {
             fn from_match(m: InputMatch) -> Self {
-                let InputMatch::List(entries) = m else { unreachable!() };
+                let InputMatch::List(entries) = m else { unreachable!("{} - {:?}", ::std::stringify!($pat_name), m) };
                 Self {
                     entries: entries.into_iter().map(|x| <$t>::from_match(x)).collect(),
                 }
@@ -238,11 +238,11 @@ def_seq!(PatRepeatedMotion = [
 
 def_seq!(PatAction = [
     verb => PatVerb::input_pattern() => PatVerb,
-    motion => PatMotion::input_pattern() => PatRepeatedMotion,
+    motion => PatRepeatedMotion::input_pattern() => PatRepeatedMotion,
 ]);
 
 def_alt!(PatKeymap = [
-    Motion => PatMotion::input_pattern() => PatRepeatedMotion,
+    Motion => PatRepeatedMotion::input_pattern() => PatRepeatedMotion,
     Action => PatAction::input_pattern() => PatAction,
 ]);
 
@@ -262,6 +262,7 @@ fn bar() {
                 .join("")
                 .parse::<usize>()
                 .unwrap();
+            //let count = motion.count.key.key.0.parse::<usize>().unwrap();
 
             match motion.motion {
                 PatMotion::NextWord(_) => println!("next by {count}"),
