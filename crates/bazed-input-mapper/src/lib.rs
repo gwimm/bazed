@@ -17,6 +17,7 @@ pub mod input_event;
 pub mod key_combo;
 pub mod keymap;
 pub mod input_pattern;
+mod input_dfa;
 
 /// Id of a keymap.
 ///

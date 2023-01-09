@@ -141,11 +141,13 @@ dependencies = [
  "derive_more",
  "dyn-clone",
  "itertools",
+ "maplit",
  "nonempty",
  "serde",
  "thiserror",
  "unicode-canonical-combining-class",
  "unicode-general-category",
+ "uuid 1.2.2",
 ]
 
 [[package]]

@@ -8,12 +8,30 @@ use std::{
 use dyn_clone::DynClone;
 use itertools::Itertools;
 
-use crate::input_event::{Key, KeyInput, Modifiers, RawKey};
+use crate::{
+    input_dfa::Nfa,
+    input_event::{Key, KeyInput, Modifiers, RawKey},
+};
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Combo {
     modifiers: Modifiers,
     key: String,
+}
+impl std::fmt::Debug for Combo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl std::fmt::Display for Combo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.modifiers.is_empty() {
+            write!(f, "{}", self.key)
+        } else {
+            write!(f, "<{}-{}>", self.modifiers, self.key)
+        }
+    }
 }
 
 impl Combo {
@@ -38,12 +56,12 @@ pub enum Repetition {
 pub trait KeyPredicate: DynClone {
     fn check(&self, input: &KeyInput) -> bool;
 }
+
 dyn_clone::clone_trait_object!(KeyPredicate);
 
 #[derive(Clone)]
 pub enum InputPattern {
-    KeyInput(Combo),
-    CheckFn(Box<dyn KeyPredicate + 'static>),
+    Combo(Combo),
     Alternative(Vec<(String, InputPattern)>),
     OneOf(Vec<InputPattern>),
     Sequence(Vec<(String, InputPattern)>),
@@ -56,16 +74,8 @@ impl InputPattern {
         inputs: &mut Peekable<impl Iterator<Item = KeyInput>>,
     ) -> Option<InputMatch> {
         match self {
-            InputPattern::KeyInput(c) => {
+            InputPattern::Combo(c) => {
                 if c.matches(inputs.peek()?) {
-                    let k = inputs.next().unwrap();
-                    Some(InputMatch::KeyInput(k))
-                } else {
-                    None
-                }
-            },
-            InputPattern::CheckFn(f) => {
-                if f.check(inputs.peek()?) {
                     let k = inputs.next().unwrap();
                     Some(InputMatch::KeyInput(k))
                 } else {
@@ -129,8 +139,7 @@ impl InputMatch {
 impl std::fmt::Debug for InputPattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::KeyInput(arg0) => f.debug_tuple("KeyInput").field(arg0).finish(),
-            Self::CheckFn(_) => f.debug_tuple("CheckFn").finish(),
+            Self::Combo(arg0) => f.debug_tuple("KeyInput").field(arg0).finish(),
             Self::Alternative(arg0) => f.debug_tuple("Alternative").field(arg0).finish(),
             Self::OneOf(arg0) => f.debug_tuple("OneOf").field(arg0).finish(),
             Self::Sequence(arg0) => f.debug_tuple("Sequence").field(arg0).finish(),
@@ -140,7 +149,7 @@ impl std::fmt::Debug for InputPattern {
 }
 
 pub fn key(k: &str) -> InputPattern {
-    InputPattern::KeyInput(Combo::from_key(k))
+    InputPattern::Combo(Combo::from_key(k))
 }
 
 macro_rules! alt {
@@ -190,7 +199,7 @@ fn input() -> Vec<KeyInput> {
 }
 
 fn foo() -> InputPattern {
-    let digit = InputPattern::OneOf((0..10).map(|x| key(&x.to_string())).collect());
+    let digit = InputPattern::OneOf((0..2).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
     let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
     let repeated_motion = seq!["count" => opt(number), "motion" => motion];
@@ -198,6 +207,22 @@ fn foo() -> InputPattern {
     let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
     let keymap = alt!["action" => action, "motion" => repeated_motion];
     keymap
+}
+
+#[test]
+fn graphviz_lol() {
+    let digit = InputPattern::OneOf((0..2).map(|x| key(&x.to_string())).collect());
+    let number = many1(digit);
+    let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
+    let repeated_motion = seq!["count" => opt(number.clone()), "motion" => motion.clone()];
+    let verb = alt!["delete" => key("d"), "change" => key("c")];
+    let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
+    let keymap = alt!["action" => action, "motion" => repeated_motion.clone()];
+
+    let mut nfa = Nfa::from_input_pattern(keymap);
+    nfa.minimize();
+
+    println!("{}", nfa.to_graphviz());
 }
 
 #[test]
