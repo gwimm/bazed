@@ -99,12 +99,31 @@ impl InputPattern {
     }
 }
 
-#[derive(Clone, Debug, derive_more::Unwrap)]
+#[derive(Clone, Debug)]
 pub enum InputMatch {
     KeyInput(KeyInput),
     Alternative(String, Box<InputMatch>),
     List(Vec<InputMatch>),
     Sequence(HashMap<String, InputMatch>),
+}
+
+impl InputMatch {
+    fn unwrap_key_input(&self) -> &KeyInput {
+        let Self::KeyInput(x) = self else { panic!("{self:?} was not a KeyInput") };
+        x
+    }
+    fn unwrap_alt(&self) -> (&str, &InputMatch) {
+        let Self::Alternative(x, x1) = self else { panic!("{self:?} was not an Alternative") };
+        (x, x1)
+    }
+    fn unwrap_list(&self) -> &Vec<InputMatch> {
+        let Self::List(x) = self else { panic!("{self:?} was not a List") };
+        x
+    }
+    fn unwrap_seq(&self) -> &HashMap<String, InputMatch> {
+        let Self::Sequence(x) = self else { panic!("{self:?} was not a Sequence") };
+        x
+    }
 }
 
 impl std::fmt::Debug for InputPattern {
@@ -141,140 +160,8 @@ pub fn opt(x: InputPattern) -> InputPattern {
     InputPattern::Repeat(Repetition::Optional, Box::new(x))
 }
 
-macro_rules! def_alt {
-    ($pat_name:ident = [$($name:ident => $pat:expr => $t:ty),*$(,)?]) => {
-        #[derive(Debug)]
-        enum $pat_name {
-            $($name($t)),*
-        }
-        impl $pat_name {
-            fn input_pattern() -> InputPattern {
-                InputPattern::Alternative(
-                    vec![$((::std::stringify!($name).to_string(), $pat)),*]
-                )
-            }
-            fn from_match(m: InputMatch) -> Self {
-                let InputMatch::Alternative(variant, value) = m else { unreachable!() };
-                match variant.as_str() {
-                    $(::std::stringify!($name) => Self::$name(<$t>::from_match(*value))),*,
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-}
-
-macro_rules! def_seq {
-    ($pat_name:ident = [$($name:ident => $pat:expr => $t:ty),*$(,)?]) => {
-        #[derive(Debug)]
-        struct $pat_name {
-            $($name: $t),*
-        }
-        impl $pat_name {
-            fn input_pattern() -> InputPattern {
-                InputPattern::Sequence(
-                    vec![$((::std::stringify!($name).to_string(), $pat)),*]
-                )
-            }
-            fn from_match(m: InputMatch) -> Self {
-                let InputMatch::Sequence(mut entries) = m else { unreachable!() };
-                Self {
-                    $($name: <$t>::from_match(entries.remove(::std::stringify!($name)).unwrap())),*
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-struct PatKey {
-    key: KeyInput,
-}
-
-impl PatKey {
-    fn from_match(m: InputMatch) -> Self {
-        let InputMatch::KeyInput(key) = m else { unreachable!() };
-        Self { key }
-    }
-}
-
-macro_rules! def_list {
-    ($pat_name:ident = $t:ty) => {
-        #[derive(Debug)]
-        struct $pat_name {
-            entries: Vec<$t>,
-        }
-        impl $pat_name {
-            fn from_match(m: InputMatch) -> Self {
-                let InputMatch::List(entries) = m else { unreachable!("{} - {:?}", ::std::stringify!($pat_name), m) };
-                Self {
-                    entries: entries.into_iter().map(|x| <$t>::from_match(x)).collect(),
-                }
-            }
-        }
-    };
-}
-
-def_alt!(PatMotion = [
-    NextWord => key("w") => PatKey,
-    PrevWord => key("b") => PatKey,
-]);
-
-def_alt!(PatVerb = [
-    Delete => key("d") => PatKey,
-    Change => key("c") => PatKey,
-]);
-
 fn digit() -> InputPattern {
     InputPattern::OneOf((0..10).map(|x| key(&x.to_string())).collect())
-}
-def_list!(PatNumber = PatKey);
-def_list!(PatOptNumber = PatNumber);
-
-def_seq!(PatRepeatedMotion = [
-    count => many1(digit()) => PatOptNumber,
-    motion => PatMotion::input_pattern() => PatMotion,
-]);
-
-def_seq!(PatAction = [
-    verb => PatVerb::input_pattern() => PatVerb,
-    motion => PatRepeatedMotion::input_pattern() => PatRepeatedMotion,
-]);
-
-def_alt!(PatKeymap = [
-    Motion => PatRepeatedMotion::input_pattern() => PatRepeatedMotion,
-    Action => PatAction::input_pattern() => PatAction,
-]);
-
-#[test]
-fn bar() {
-    let res = PatKeymap::input_pattern()
-        .parse(&mut input().into_iter().peekable())
-        .unwrap();
-    match PatKeymap::from_match(res) {
-        PatKeymap::Motion(motion) => {
-            let count = motion
-                .count
-                .entries
-                .iter()
-                .flat_map(|x| x.entries.iter())
-                .map(|x| &x.key.key)
-                .join("")
-                .parse::<usize>()
-                .unwrap();
-            //let count = motion.count.key.key.0.parse::<usize>().unwrap();
-
-            match motion.motion {
-                PatMotion::NextWord(_) => println!("next by {count}"),
-                PatMotion::PrevWord(_) => println!("prev by {count}"),
-            };
-        },
-        PatKeymap::Action(action) => {
-            println!("verb: {:?}", action.verb);
-            println!("motion: {:?}", action.motion);
-        },
-    }
-    panic!();
 }
 
 fn input() -> Vec<KeyInput> {
@@ -330,43 +217,45 @@ fn test_foo() {
         Change,
     }
 
-    fn interpret_repeated_motion(m: InputMatch) -> (usize, Motion) {
-        let m = m.unwrap_sequence();
-        let count = m.get("count").unwrap().clone();
-        let count = count.unwrap_list();
-        let count = count
+    fn interpret_number(m: &InputMatch) -> usize {
+        m.unwrap_list()
             .into_iter()
             .flat_map(|x| x.unwrap_list().into_iter())
-            .map(|x| x.unwrap_key_input().key)
+            .map(|x| x.unwrap_key_input().key.as_str())
             .join("")
             .parse::<usize>()
-            .unwrap();
-        let motion = m.get("motion").unwrap().clone().unwrap_alternative().0;
-        let motion = match motion.as_str() {
+            .unwrap()
+    }
+
+    fn interpret_repeated_motion(m: &InputMatch) -> (usize, Motion) {
+        let m = m.unwrap_seq();
+        let count = interpret_number(&m["count"]);
+        let motion = match m["motion"].unwrap_alt().0 {
             "next_word" => Motion::NextWord,
             "prev_word" => Motion::PrevWord,
             _ => unreachable!(),
         };
         (count, motion)
     }
-    fn interpret_verb(m: InputMatch) -> Verb {
-        match m.unwrap_alternative().0.as_str() {
+
+    fn interpret_verb(m: &InputMatch) -> Verb {
+        match m.unwrap_alt().0 {
             "delete" => Verb::Delete,
             "change" => Verb::Change,
             _ => unreachable!(),
         }
     }
 
-    let alternative = res.unwrap_alternative();
-    match alternative.0.as_str() {
+    let alternative = res.unwrap_alt();
+    match alternative.0 {
         "action" => {
-            let s = alternative.1.unwrap_sequence();
-            let verb = interpret_verb(s.get("verb").unwrap().clone());
-            let motion = interpret_repeated_motion(s.get("motion").unwrap().clone());
+            let s = alternative.1.unwrap_seq();
+            let verb = interpret_verb(&s["verb"]);
+            let motion = interpret_repeated_motion(&s["motion"]);
             println!("Action: {verb:?} {motion:?}");
         },
         "motion" => {
-            let motion = interpret_repeated_motion(*alternative.1);
+            let motion = interpret_repeated_motion(alternative.1);
             println!("Move: {motion:?}");
         },
         _ => unreachable!(),
