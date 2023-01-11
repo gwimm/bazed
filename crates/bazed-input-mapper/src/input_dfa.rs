@@ -141,14 +141,14 @@ impl Nfa {
             if remove.contains(state_0) {
                 continue;
             }
-            let edges_0 = self.edges.get(&state_0).cloned();
-            let epsilons_0 = self.epsilon_edges.get(&state_0).cloned();
+            let edges_0 = self.edges.get(state_0).cloned();
+            let epsilons_0 = self.epsilon_edges.get(state_0).cloned();
             for state_1 in &self.states {
                 if remove.contains(state_1) {
                     continue;
                 }
-                let edges_1 = self.edges.get(&state_1);
-                let epsilons_1 = self.epsilon_edges.get(&state_1);
+                let edges_1 = self.edges.get(state_1);
+                let epsilons_1 = self.epsilon_edges.get(state_1);
                 if edges_0.as_ref() == edges_1
                     && epsilons_0.as_ref() == epsilons_1
                     && state_0 != state_1
@@ -220,11 +220,9 @@ fn rep_optional_nfa(nfa: Nfa) -> (Nfa) {
     let mut edges = HashMap::new();
     //TODO clone lmao
     states.extend(nfa.states.clone());
-    //TODO clone lmao
-    epsilon_edges.extend(nfa.epsilon_edges.clone());
+    epsilon_edges.extend(nfa.epsilon_edges);
     epsilon_edges.insert(nfa.accept, hashset![accept]);
-    //TODO clone lmao
-    edges.extend(nfa.edges.clone());
+    edges.extend(nfa.edges);
     Nfa {
         start,
         states,

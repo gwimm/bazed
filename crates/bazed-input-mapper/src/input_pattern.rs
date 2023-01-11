@@ -20,7 +20,7 @@ pub struct Combo {
 }
 impl std::fmt::Debug for Combo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -102,7 +102,7 @@ impl InputPattern {
                 },
                 Repetition::OneOrMore => {
                     let res: Vec<_> = iter::from_fn(|| pat.parse(inputs)).collect();
-                    (res.len() > 0).then_some(InputMatch::List(res))
+                    (!res.is_empty()).then_some(InputMatch::List(res))
                 },
             },
         }
@@ -205,8 +205,7 @@ fn foo() -> InputPattern {
     let repeated_motion = seq!["count" => opt(number), "motion" => motion];
     let verb = alt!["delete" => key("d"), "change" => key("c")];
     let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
-    let keymap = alt!["action" => action, "motion" => repeated_motion];
-    keymap
+    alt!["action" => action, "motion" => repeated_motion]
 }
 
 #[test]
@@ -214,10 +213,10 @@ fn graphviz_lol() {
     let digit = InputPattern::OneOf((0..2).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
     let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
-    let repeated_motion = seq!["count" => opt(number.clone()), "motion" => motion.clone()];
+    let repeated_motion = seq!["count" => opt(number), "motion" => motion];
     let verb = alt!["delete" => key("d"), "change" => key("c")];
     let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
-    let keymap = alt!["action" => action, "motion" => repeated_motion.clone()];
+    let keymap = alt!["action" => action, "motion" => repeated_motion];
 
     let mut nfa = Nfa::from_input_pattern(keymap);
     nfa.minimize();
@@ -244,8 +243,8 @@ fn test_foo() {
 
     fn interpret_number(m: &InputMatch) -> usize {
         m.unwrap_list()
-            .into_iter()
-            .flat_map(|x| x.unwrap_list().into_iter())
+            .iter()
+            .flat_map(|x| x.unwrap_list().iter())
             .map(|x| x.unwrap_key_input().key.as_str())
             .join("")
             .parse::<usize>()
