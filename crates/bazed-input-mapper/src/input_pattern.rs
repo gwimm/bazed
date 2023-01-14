@@ -59,6 +59,7 @@ pub trait KeyPredicate: DynClone {
 
 dyn_clone::clone_trait_object!(KeyPredicate);
 
+//TODO instead of Alternative vs OneOf, just have a CaptureGroup pattern
 #[derive(Clone)]
 pub enum InputPattern {
     Combo(Combo),
@@ -210,18 +211,22 @@ fn foo() -> InputPattern {
 
 #[test]
 fn graphviz_lol() {
-    let digit = InputPattern::OneOf((0..2).map(|x| key(&x.to_string())).collect());
+    let digit = InputPattern::OneOf((0..10).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
     let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
-    let repeated_motion = seq!["count" => opt(number), "motion" => motion];
+    let repeated_motion = seq!["count" => opt(number.clone()), "motion" => motion];
     let verb = alt!["delete" => key("d"), "change" => key("c")];
     let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
-    let keymap = alt!["action" => action, "motion" => repeated_motion];
+    let keymap = alt!["action" => action, "motion" => repeated_motion.clone()];
 
     let mut nfa = Nfa::from_input_pattern(keymap);
-    nfa.minimize();
-
+    //nfa.to_graphviz()
+    //nfa.minimize();
     println!("{}", nfa.to_graphviz());
+
+    let dfa = nfa.into_dfa();
+
+    println!("{}", dfa.to_graphviz());
 }
 
 #[test]

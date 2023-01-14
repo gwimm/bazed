@@ -1,3 +1,5 @@
+#![feature(once_cell)]
+
 #![forbid(unreachable_pub)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]

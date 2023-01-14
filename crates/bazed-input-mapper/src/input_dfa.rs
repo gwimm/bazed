@@ -1,6 +1,9 @@
 #![allow(unused)]
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{atomic::AtomicUsize, LazyLock},
+};
 
 use itertools::Itertools;
 use maplit::{hashmap, hashset};
@@ -8,15 +11,26 @@ use uuid::Uuid;
 
 use crate::input_pattern::{Combo, InputPattern, Repetition};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-struct State(Uuid);
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, derive_more::Display)]
+struct State(usize);
+
 impl State {
     fn new() -> Self {
-        State(Uuid::new_v4())
+        static COUNTER: LazyLock<AtomicUsize> = LazyLock::new(|| AtomicUsize::new(0));
+        //State(Uuid::new_v4())
+        State(COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
     }
 }
 
 type EdgeMap = HashMap<State, HashMap<Combo, State>>;
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Dfa {
+    start: State,
+    states: HashSet<State>,
+    edges: EdgeMap,
+    accepting: HashSet<State>,
+}
 
 //TODO clone lmao
 #[derive(Clone, PartialEq, Eq)]
@@ -53,8 +67,8 @@ impl Nfa {
                     states.extend(nfa.states);
                     edges.extend(nfa.edges);
                     epsilon_edges.extend(nfa.epsilon_edges);
-                    epsilon_edges.insert(start, hashset![nfa.start]);
-                    epsilon_edges.insert(nfa.accept, hashset![accept]);
+                    epsilon_edges.entry(start).or_default().insert(nfa.start);
+                    epsilon_edges.entry(nfa.accept).or_default().insert(accept);
                 }
                 Nfa {
                     start,
@@ -74,8 +88,8 @@ impl Nfa {
                     states.extend(nfa.states);
                     edges.extend(nfa.edges);
                     epsilon_edges.extend(nfa.epsilon_edges);
-                    epsilon_edges.insert(start, hashset![nfa.start]);
-                    epsilon_edges.insert(nfa.accept, hashset![accept]);
+                    epsilon_edges.entry(start).or_default().insert(nfa.start);
+                    epsilon_edges.entry(nfa.accept).or_default().insert(accept);
                 }
                 Nfa {
                     start,
@@ -97,7 +111,7 @@ impl Nfa {
                     states.extend(nfa.states);
                     edges.extend(nfa.edges);
                     epsilon_edges.extend(nfa.epsilon_edges);
-                    epsilon_edges.insert(last, hashset![nfa.start]);
+                    epsilon_edges.entry(last).or_default().insert(nfa.start);
                     last = nfa.accept;
                     accept = nfa.accept;
                 }
@@ -116,7 +130,9 @@ impl Nfa {
                     let mut opt_nfa = rep_optional_nfa(nfa.clone());
                     opt_nfa
                         .epsilon_edges
-                        .insert(nfa.accept, hashset![nfa.start]);
+                        .entry(nfa.accept)
+                        .or_default()
+                        .insert(nfa.start);
                     opt_nfa
                 },
                 Repetition::OneOrMore => {
@@ -124,64 +140,110 @@ impl Nfa {
                     let mut opt_nfa = nfa.clone();
                     opt_nfa
                         .epsilon_edges
-                        .insert(nfa.accept, hashset![nfa.start]);
+                        .entry(nfa.accept)
+                        .or_default()
+                        .insert(nfa.start);
                     opt_nfa
                 },
             },
         }
     }
 
-    pub(crate) fn minimize(&mut self) {
-        while self.minimize_step() {}
+    fn reachable_by_epsilon(&self, start: State) -> HashSet<State> {
+        let mut reached: HashSet<State> = HashSet::new();
+        let mut todo = Vec::new();
+        reached.insert(start);
+        todo.push(start);
+        while let Some(next) = todo.pop() {
+            let Some(reachable) = self.epsilon_edges.get(&next) else { continue };
+            for state in reachable {
+                if reached.insert(*state) {
+                    todo.push(*state)
+                }
+            }
+        }
+        reached
     }
 
-    pub(crate) fn minimize_step(&mut self) -> bool {
-        let mut remove = Vec::new();
-        for state_0 in &self.states {
-            if remove.contains(state_0) {
-                continue;
-            }
-            let edges_0 = self.edges.get(state_0).cloned();
-            let epsilons_0 = self.epsilon_edges.get(state_0).cloned();
-            for state_1 in &self.states {
-                if remove.contains(state_1) {
-                    continue;
-                }
-                let edges_1 = self.edges.get(state_1);
-                let epsilons_1 = self.epsilon_edges.get(state_1);
-                if edges_0.as_ref() == edges_1
-                    && epsilons_0.as_ref() == epsilons_1
-                    && state_0 != state_1
-                {
-                    remove.push(*state_1);
-                    for e in self.edges.iter_mut() {
-                        if remove.contains(e.0) {
-                            continue;
-                        }
-                        for trans in e.1.iter_mut() {
-                            if trans.1 == state_1 {
-                                *trans.1 = *state_0;
-                            }
-                        }
-                    }
-                    for e in self.epsilon_edges.iter_mut() {
-                        if remove.contains(e.0) {
-                            continue;
-                        }
-                        if e.1.remove(state_1) {
-                            e.1.insert(*state_0);
-                        }
-                    }
+    pub(crate) fn into_dfa(self) -> Dfa {
+        // https://www.educative.io/answers/how-to-convert-nfa-to-dfa
+        // https://docs.rs/automata/0.0.4/automata/nfa/struct.Nfa.html#method.to_regex
+
+        let start_closure = self.reachable_by_epsilon(self.start);
+        let dfa_start_state = State::new();
+        // map of DFA state to the NFA states it represents
+        let mut state_sets = hashmap! {dfa_start_state => start_closure};
+        let mut dfa_edges: HashMap<State, HashMap<Combo, State>> = HashMap::new();
+        let mut todo = vec![dfa_start_state];
+        let mut accepting = HashSet::new();
+
+        while let Some(next_dfa) = todo.pop() {
+            // set of all states that this closure represents
+            let nfa_state_set = state_sets.get(&next_dfa).unwrap();
+
+            // map of edges from nfa-states corresponding to this dfa state _directly_ to other NFA states.
+            let mut outgoing: HashMap<Combo, HashSet<State>> = HashMap::new();
+
+            // fill the outgoing-edges hashmap
+            // for every nfa-state represented by the current dfa state
+            for nfa_state in nfa_state_set.clone() {
+                // get the edges and combine ones that have the same combo into states.
+                let Some(nfa_edges) = self.edges.get(&nfa_state) else { continue };
+                for (combo, nfa_target) in nfa_edges {
+                    outgoing
+                        .entry(combo.clone())
+                        .or_default()
+                        .insert(*nfa_target);
                 }
             }
+
+            for (combo, direct_nfa_targets) in outgoing {
+                // calculate epsilon closures of all these nfa-target states
+                let mut closure: HashSet<State> = direct_nfa_targets
+                    .iter()
+                    .flat_map(|x| self.reachable_by_epsilon(*x).into_iter())
+                    .collect();
+                closure.extend(direct_nfa_targets);
+
+                // The dfa state that represents the set of these nfa states.
+                // TODO this is currently horribly inefficient. Lookup by the closure is garbo
+                let closure_dfa_state = state_sets
+                    .iter()
+                    .find(|(_, v)| closure == **v)
+                    .map(|x| *x.0)
+                    .unwrap_or_else(|| {
+                        let s = State::new();
+                        state_sets.insert(s, closure.clone());
+                        todo.push(s);
+                        s
+                    });
+                if closure.contains(&self.accept) {
+                    accepting.insert(closure_dfa_state);
+                }
+
+                dfa_edges
+                    .entry(next_dfa)
+                    .or_default()
+                    .insert(combo, closure_dfa_state);
+            }
         }
-        let did_change = !remove.is_empty();
-        for s in remove {
-            self.states.remove(&s);
-            self.edges.remove(&s);
-            self.epsilon_edges.remove(&s);
-        }
-        did_change
+
+        let x = Dfa {
+            start: dfa_start_state,
+            accepting,
+            edges: dfa_edges,
+            states: state_sets.keys().cloned().collect(),
+        };
+
+        println!(
+            "{} {}}}",
+            x.to_graphviz().trim_end_matches('}'),
+            state_sets
+                .iter()
+                .map(|(k, v)| format!("\"{k}\" [label=\"{}\"]", v.iter().join(",")))
+                .join(";")
+        );
+        x
     }
 
     pub(crate) fn to_graphviz(&self) -> String {
@@ -191,7 +253,8 @@ impl Nfa {
             .flat_map(|(a, paths)| {
                 paths.iter().map(move |(trans, b)| {
                     format!(
-                        "\"{a:?}\" -> \"{b:?}\" [label=\"{}\"];\n\"{a:?}\"[label=\"lmao\"];\n\"{b:?}\"[label=\"lmao\"];",
+                        "\"{a}\" -> \"{b}\" [label=\"{}\"];",
+                        //"\"{a:?}\" -> \"{b:?}\" [label=\"{}\"];\n\"{a:?}\"[label=\"lmao\"];\n\"{b:?}\"[label=\"lmao\"];",
                         format!("{trans:?}").replace('"', "\'")
                     )
                 })
@@ -200,15 +263,16 @@ impl Nfa {
         let b = self
             .epsilon_edges
             .iter()
-            .map(|(a, b)| format!("\"{a:?}\" -> \"{b:?}\" [label=\"ε\"];\n\"{a:?}\"[label=\"lmao\"];\n\"{b:?}\"[label=\"lmao\"];"))
+            .flat_map(|(a, b)| b.iter().map(move |x| (a, x)))
+            .map(|(a, b)| format!("\"{a}\" -> \"{b}\" [label=\"ε\"];"))
             .join("\n");
 
         let colorized = format!(
-            "\"{:?}\" [label=\"start\", color=\"green\"];\n\"{:?}\" [label=\"accept\", color=\"red\"]",
+            "\"{}\" [label=\"start\", color=\"green\"];\n\"{}\" [label=\"accept\", color=\"red\"]",
             self.start, self.accept
         );
 
-        format!("digraph G {{\n{a}\n{b}\n{colorized}\n}}")
+        format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{b}\n{colorized}\n}}")
     }
 }
 
@@ -221,7 +285,7 @@ fn rep_optional_nfa(nfa: Nfa) -> (Nfa) {
     //TODO clone lmao
     states.extend(nfa.states.clone());
     epsilon_edges.extend(nfa.epsilon_edges);
-    epsilon_edges.insert(nfa.accept, hashset![accept]);
+    epsilon_edges.entry(nfa.accept).or_default().insert(accept);
     edges.extend(nfa.edges);
     Nfa {
         start,
@@ -229,5 +293,33 @@ fn rep_optional_nfa(nfa: Nfa) -> (Nfa) {
         accept,
         epsilon_edges,
         edges,
+    }
+}
+
+impl Dfa {
+    pub(crate) fn to_graphviz(&self) -> String {
+        let a = self
+            .edges
+            .iter()
+            .flat_map(|(a, paths)| {
+                paths.iter().map(move |(trans, b)| {
+                    format!(
+                        "\"{a}\" -> \"{b}\" [label=\"{}\"];",
+                        //"\"{a:?}\" -> \"{b:?}\" [label=\"{}\"];\n\"{a:?}\"[label=\"lmao\"];\n\"{b:?}\"[label=\"lmao\"];",
+                        format!("{trans:?}").replace('"', "\'")
+                    )
+                })
+            })
+            .join("\n");
+        let colorized = format!(
+            "\"{}\" [color=\"yellow\"];\n{}",
+            self.start,
+            self.accepting
+                .iter()
+                .map(|x| format!("\"{x}\" [color=\"green\"]"))
+                .join(";"),
+        );
+
+        format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{colorized}\n}}")
     }
 }
