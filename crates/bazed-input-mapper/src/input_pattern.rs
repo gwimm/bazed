@@ -225,9 +225,14 @@ fn graphviz_lol() {
     let mut nfa = Nfa::from_input_pattern(keymap);
     //nfa.to_graphviz()
     //nfa.minimize();
-    println!("{}", nfa.to_graphviz());
+    //println!("{}", nfa.to_graphviz());
 
-    let dfa = nfa.into_dfa();
+    let mut dfa = nfa.into_dfa();
+    println!("{}", dfa.to_graphviz());
+    //let dfa = dfa.minimize_step();
+    //let dfa = dfa.minimize_step();
+    let dfa = dfa.hopcroft_min();
+    //dfa.minimize();
 
     println!("{}", dfa.to_graphviz());
 }

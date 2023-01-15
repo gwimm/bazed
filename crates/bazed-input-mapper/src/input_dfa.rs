@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{atomic::AtomicUsize, LazyLock},
 };
 
@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::input_pattern::{Combo, InputPattern, Repetition};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, derive_more::Display)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, derive_more::Display, PartialOrd, Ord)]
 struct State(usize);
 
 impl State {
@@ -242,6 +242,144 @@ impl Nfa {
 }
 
 impl Dfa {
+    fn insert_edge(&mut self, from: State, combo: Combo, to: State) {
+        self.edges.entry(from).or_default().insert(combo, to);
+    }
+
+    pub(crate) fn hopcroft_min(mut self) -> Self {
+        let mut partition_set: Vec<HashSet<_>> = vec![
+            self.accepting.clone(),
+            self.states.difference(&self.accepting).copied().collect(),
+        ];
+        let mut work_set = partition_set.clone();
+        while let Some(current_set) = work_set.pop() {
+            for symbol in self.alphabet() {
+                let next_set = self
+                    .edges
+                    .iter()
+                    .filter(|(_, mappings)| {
+                        mappings
+                            .get(symbol)
+                            .map_or(false, |x| current_set.contains(x))
+                    })
+                    .map(|(x, _)| *x)
+                    .collect::<HashSet<_>>();
+
+                let existing_sets: Vec<_> = partition_set
+                    .iter()
+                    .filter(|s| {
+                        next_set.intersection(s).next().is_some()
+                            && s.difference(&next_set).next().is_some()
+                    })
+                    .cloned()
+                    .collect();
+                for existing_set in &existing_sets {
+                    partition_set.retain(|x| x != existing_set);
+                    let intersection: HashSet<_> =
+                        next_set.intersection(existing_set).copied().collect();
+                    let difference: HashSet<_> =
+                        existing_set.difference(&next_set).copied().collect();
+                    partition_set.push(intersection.clone());
+                    partition_set.push(difference.clone());
+
+                    if work_set.contains(existing_set) {
+                        work_set.retain(|x| x != existing_set);
+                        partition_set.push(intersection);
+                        partition_set.push(difference);
+                    } else if intersection.len() <= difference.len() {
+                        work_set.push(intersection)
+                    } else {
+                        work_set.push(difference)
+                    }
+                }
+            }
+        }
+        let mut dfa = Dfa {
+            start: self.start,
+            accepting: hashset![],
+            edges: HashMap::new(),
+            states: hashset![],
+        };
+
+        let mut partition_mapping = HashMap::new();
+
+        for partition in partition_set.iter() {
+            let new_state = if partition == &hashset![self.start] {
+                self.start
+            } else {
+                State::new()
+            };
+            dfa.states.insert(new_state);
+            for old_state in partition {
+                partition_mapping.insert(old_state, new_state);
+            }
+        }
+
+        for partition in partition_set.iter() {
+            // technically, all these elements are known to be equivalent,
+            // so let's just take any one of them and work with that one
+            let partition_elem = partition.iter().next().unwrap();
+            let outgoing = self.edges.remove(partition_elem).unwrap_or_default();
+            for (combo, target) in outgoing {
+                dfa.insert_edge(
+                    partition_mapping[partition_elem],
+                    combo,
+                    partition_mapping[&target],
+                )
+            }
+            if self.accepting.contains(partition_elem) {
+                dfa.accepting.insert(partition_mapping[&partition_elem]);
+            }
+        }
+        dfa
+    }
+
+    fn alphabet(&self) -> impl Iterator<Item = &Combo> {
+        self.edges.values().flat_map(|x| x.keys())
+    }
+
+    pub(crate) fn minimize_step(self) -> Dfa {
+        let mut new = Dfa {
+            start: self.start,
+            accepting: HashSet::new(),
+            edges: HashMap::new(),
+            states: hashset![self.start],
+        };
+
+        let mut state_mappings = hashmap! { self.start => hashset![self.start] };
+        let mut todo = vec![self.start];
+        let mut visited: HashSet<State> = HashSet::new();
+
+        while let Some(next) = todo.pop() {
+            let matching_old = state_mappings.get(&next).cloned().unwrap();
+            if visited.is_superset(&matching_old) {
+                continue;
+            }
+            visited.extend(matching_old.iter());
+            let reachable = matching_old
+                .iter()
+                .filter_map(|x| self.edges.get(x))
+                .flatten();
+            // now, we check which of these states are equivalent
+            let groups = reachable.group_by(|(_, state)| self.edges.get(state)); // TODO check for is accepting, capture groups
+            for (_, group) in &groups {
+                let (group_combos, old_group_states): (Vec<_>, HashSet<_>) =
+                    group.map(|(a, b)| (a.clone(), *b)).unzip();
+                let group_state = State::new();
+                new.states.insert(group_state);
+                todo.push(group_state);
+                state_mappings
+                    .entry(group_state)
+                    .or_default()
+                    .extend(old_group_states);
+                for combo in group_combos {
+                    new.insert_edge(next, combo, group_state);
+                }
+            }
+        }
+        new
+    }
+
     pub(crate) fn to_graphviz(&self) -> String {
         let a = self
             .edges
