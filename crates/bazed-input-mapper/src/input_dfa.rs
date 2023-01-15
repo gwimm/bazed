@@ -56,29 +56,9 @@ impl Nfa {
                     epsilon_edges: HashMap::new(),
                 }
             },
+            InputPattern::Capture(name, pat) => Nfa::from_input_pattern(*pat),
             InputPattern::Alternative(options) => {
                 // TODO capture groups here!!!!
-                let start = State::new();
-                let accept = State::new();
-                let mut states = HashSet::new();
-                let mut epsilon_edges = HashMap::new();
-                let mut edges = HashMap::new();
-                for nfa in options.into_iter().map(|(_, x)| Nfa::from_input_pattern(x)) {
-                    states.extend(nfa.states);
-                    edges.extend(nfa.edges);
-                    epsilon_edges.extend(nfa.epsilon_edges);
-                    epsilon_edges.entry(start).or_default().insert(nfa.start);
-                    epsilon_edges.entry(nfa.accept).or_default().insert(accept);
-                }
-                Nfa {
-                    start,
-                    states,
-                    accept,
-                    epsilon_edges,
-                    edges,
-                }
-            },
-            InputPattern::OneOf(options) => {
                 let start = State::new();
                 let accept = State::new();
                 let mut states = HashSet::new();
@@ -107,7 +87,7 @@ impl Nfa {
                 let mut epsilon_edges = HashMap::new();
                 let mut edges = HashMap::new();
                 let mut last = start;
-                for nfa in seq.into_iter().map(|(_, x)| Nfa::from_input_pattern(x)) {
+                for nfa in seq.into_iter().map(Nfa::from_input_pattern) {
                     states.extend(nfa.states);
                     edges.extend(nfa.edges);
                     epsilon_edges.extend(nfa.epsilon_edges);
