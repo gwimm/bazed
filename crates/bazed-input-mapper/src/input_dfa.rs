@@ -38,92 +38,84 @@ pub(crate) struct Nfa {
     start: State,
     states: HashSet<State>,
     edges: EdgeMap,
-    epsilon_edges: HashMap<State, HashSet<State>>,
+    epsilons: HashMap<State, HashSet<State>>,
     accept: State,
 }
 
 impl Nfa {
+    fn new(start: State, accept: State) -> Self {
+        Self {
+            start,
+            accept,
+            states: hashset![start, accept],
+            edges: HashMap::new(),
+            epsilons: HashMap::new(),
+        }
+    }
+
+    fn into_optional(mut self) -> Self {
+        self.insert_epsilon(self.start, self.accept);
+        self
+    }
+
+    fn insert_epsilon(&mut self, from: State, to: State) {
+        self.epsilons.entry(from).or_default().insert(to);
+    }
+
+    fn insert_edge(&mut self, from: State, combo: Combo, to: State) {
+        self.edges.entry(from).or_default().insert(combo, to);
+    }
+
+    /// Extend this NFA by another NFA, adding its states, edges and epsilons.
+    /// start and accepting states are unaffected
+    fn extend(&mut self, other: Nfa) {
+        self.states.extend(other.states);
+        self.edges.extend(other.edges);
+        self.epsilons.extend(other.epsilons);
+    }
+
     pub(crate) fn from_input_pattern(pattern: InputPattern) -> Nfa {
         match pattern {
             InputPattern::Combo(combo) => {
-                let start = State::new();
-                let accept = State::new();
-                Self {
-                    start,
-                    states: hashset![start, accept],
-                    accept,
-                    edges: hashmap! { start => hashmap! { combo => accept } },
-                    epsilon_edges: HashMap::new(),
-                }
+                let mut nfa = Self::new(State::new(), State::new());
+                nfa.insert_edge(nfa.start, combo, nfa.accept);
+                nfa
             },
             InputPattern::Capture(name, pat) => Nfa::from_input_pattern(*pat),
             InputPattern::Alternative(options) => {
-                // TODO capture groups here!!!!
-                let start = State::new();
-                let accept = State::new();
-                let mut states = HashSet::new();
-                let mut epsilon_edges = HashMap::new();
-                let mut edges = HashMap::new();
-                for nfa in options.into_iter().map(Nfa::from_input_pattern) {
-                    states.extend(nfa.states);
-                    edges.extend(nfa.edges);
-                    epsilon_edges.extend(nfa.epsilon_edges);
-                    epsilon_edges.entry(start).or_default().insert(nfa.start);
-                    epsilon_edges.entry(nfa.accept).or_default().insert(accept);
+                let mut new = Nfa::new(State::new(), State::new());
+                for sub in options.into_iter().map(Nfa::from_input_pattern) {
+                    new.insert_epsilon(new.start, sub.start);
+                    new.insert_epsilon(sub.accept, new.accept);
+                    new.extend(sub);
                 }
-                Nfa {
-                    start,
-                    states,
-                    accept,
-                    epsilon_edges,
-                    edges,
-                }
+                new
             },
             InputPattern::Sequence(seq) => {
-                // TODO capture groups here!!!!
                 let start = State::new();
-                let mut accept = State::new();
-                let mut states = HashSet::new();
-                let mut epsilon_edges = HashMap::new();
-                let mut edges = HashMap::new();
-                let mut last = start;
-                for nfa in seq.into_iter().map(Nfa::from_input_pattern) {
-                    states.extend(nfa.states);
-                    edges.extend(nfa.edges);
-                    epsilon_edges.extend(nfa.epsilon_edges);
-                    epsilon_edges.entry(last).or_default().insert(nfa.start);
-                    last = nfa.accept;
-                    accept = nfa.accept;
+                // we start the nfa out with having the start state be accepting,
+                // but then shift the accept state further to the end with every step of the seq
+                let mut new = Nfa::new(start, start);
+                for sub in seq.into_iter().map(Nfa::from_input_pattern) {
+                    // Make the current end-state point to the sub-nfas start state
+                    new.insert_epsilon(new.accept, sub.start);
+                    // set the end of the sub-nfa to be the end of the seq-nfa
+                    new.accept = sub.accept;
+                    new.extend(sub);
                 }
-                Nfa {
-                    start,
-                    states,
-                    accept,
-                    epsilon_edges,
-                    edges,
-                }
+                new
             },
             InputPattern::Repeat(rep, pat) => match rep {
-                Repetition::Optional => rep_optional_nfa(Nfa::from_input_pattern(*pat)),
+                Repetition::Optional => Nfa::from_input_pattern(*pat).into_optional(),
                 Repetition::ZeroOrMore => {
-                    let nfa = Nfa::from_input_pattern(*pat);
-                    let mut opt_nfa = rep_optional_nfa(nfa.clone());
-                    opt_nfa
-                        .epsilon_edges
-                        .entry(nfa.accept)
-                        .or_default()
-                        .insert(nfa.start);
-                    opt_nfa
+                    let mut nfa = Nfa::from_input_pattern(*pat).into_optional();
+                    nfa.insert_epsilon(nfa.accept, nfa.start);
+                    nfa
                 },
                 Repetition::OneOrMore => {
-                    let nfa = Nfa::from_input_pattern(*pat);
-                    let mut opt_nfa = nfa.clone();
-                    opt_nfa
-                        .epsilon_edges
-                        .entry(nfa.accept)
-                        .or_default()
-                        .insert(nfa.start);
-                    opt_nfa
+                    let mut nfa = Nfa::from_input_pattern(*pat);
+                    nfa.insert_epsilon(nfa.accept, nfa.start);
+                    nfa
                 },
             },
         }
@@ -135,7 +127,7 @@ impl Nfa {
         reached.insert(start);
         todo.push(start);
         while let Some(next) = todo.pop() {
-            let Some(reachable) = self.epsilon_edges.get(&next) else { continue };
+            let Some(reachable) = self.epsilons.get(&next) else { continue };
             for state in reachable {
                 if reached.insert(*state) {
                     todo.push(*state)
@@ -221,7 +213,7 @@ impl Nfa {
             state_sets
                 .iter()
                 .map(|(k, v)| format!("\"{k}\" [label=\"{}\"]", v.iter().join(",")))
-                .join(";")
+                .join(";\n")
         );
         x
     }
@@ -234,38 +226,18 @@ impl Nfa {
             .map(move |(a, trans, b)| edge_to_graphviz(a, trans, b))
             .join("\n");
         let b = self
-            .epsilon_edges
+            .epsilons
             .iter()
             .flat_map(|(a, b)| b.iter().map(move |x| (a, x)))
             .map(|(a, b)| edge_to_graphviz(a, "ε", b))
             .join("\n");
 
         let colorized = format!(
-            r#""{}" [label="start", color="green"];\n"{}" [label="accept", color="red"]"#,
+            r#""{}" [label="start", color="green"]; "{}" [label="accept", color="red"]"#,
             self.start, self.accept
         );
 
         format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{b}\n{colorized}\n}}")
-    }
-}
-
-fn rep_optional_nfa(nfa: Nfa) -> (Nfa) {
-    let start = State::new();
-    let accept = State::new();
-    let mut states = hashset![start, accept];
-    let mut epsilon_edges = hashmap! {start => hashset![accept], start => hashset![nfa.start]};
-    let mut edges = HashMap::new();
-    //TODO clone lmao
-    states.extend(nfa.states.clone());
-    epsilon_edges.extend(nfa.epsilon_edges);
-    epsilon_edges.entry(nfa.accept).or_default().insert(accept);
-    edges.extend(nfa.edges);
-    Nfa {
-        start,
-        states,
-        accept,
-        epsilon_edges,
-        edges,
     }
 }
 
