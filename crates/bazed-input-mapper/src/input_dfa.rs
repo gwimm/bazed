@@ -250,25 +250,18 @@ impl Nfa {
         let a = self
             .edges
             .iter()
-            .flat_map(|(a, paths)| {
-                paths.iter().map(move |(trans, b)| {
-                    format!(
-                        "\"{a}\" -> \"{b}\" [label=\"{}\"];",
-                        //"\"{a:?}\" -> \"{b:?}\" [label=\"{}\"];\n\"{a:?}\"[label=\"lmao\"];\n\"{b:?}\"[label=\"lmao\"];",
-                        format!("{trans:?}").replace('"', "\'")
-                    )
-                })
-            })
+            .flat_map(|(a, paths)| paths.iter().map(move |(trans, b)| (a, trans, b)))
+            .map(move |(a, trans, b)| edge_to_graphviz(a, trans, b))
             .join("\n");
         let b = self
             .epsilon_edges
             .iter()
             .flat_map(|(a, b)| b.iter().map(move |x| (a, x)))
-            .map(|(a, b)| format!("\"{a}\" -> \"{b}\" [label=\"ε\"];"))
+            .map(|(a, b)| edge_to_graphviz(a, "ε", b))
             .join("\n");
 
         let colorized = format!(
-            "\"{}\" [label=\"start\", color=\"green\"];\n\"{}\" [label=\"accept\", color=\"red\"]",
+            r#""{}" [label="start", color="green"];\n"{}" [label="accept", color="red"]"#,
             self.start, self.accept
         );
 
@@ -301,16 +294,10 @@ impl Dfa {
         let a = self
             .edges
             .iter()
-            .flat_map(|(a, paths)| {
-                paths.iter().map(move |(trans, b)| {
-                    format!(
-                        "\"{a}\" -> \"{b}\" [label=\"{}\"];",
-                        //"\"{a:?}\" -> \"{b:?}\" [label=\"{}\"];\n\"{a:?}\"[label=\"lmao\"];\n\"{b:?}\"[label=\"lmao\"];",
-                        format!("{trans:?}").replace('"', "\'")
-                    )
-                })
-            })
+            .flat_map(|(a, paths)| paths.iter().map(move |(trans, b)| (a, trans, b)))
+            .map(move |(a, trans, b)| edge_to_graphviz(a, trans, b))
             .join("\n");
+
         let colorized = format!(
             "\"{}\" [color=\"yellow\"];\n{}",
             self.start,
@@ -322,4 +309,11 @@ impl Dfa {
 
         format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{colorized}\n}}")
     }
+}
+
+fn edge_to_graphviz(a: &State, edge: impl std::fmt::Display, b: &State) -> String {
+    format!(
+        "\"{a}\" -> \"{b}\" [label=\"{}\"];",
+        format!("{edge}").replace('"', "\'")
+    )
 }

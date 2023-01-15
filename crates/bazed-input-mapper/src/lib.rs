@@ -1,5 +1,4 @@
 #![feature(once_cell)]
-
 #![forbid(unreachable_pub)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]
@@ -15,11 +14,11 @@ use input_event::KeyInput;
 use keymap::{Keymap, KeymapNode};
 use nonempty::NonEmpty;
 
+mod input_dfa;
 pub mod input_event;
+pub mod input_pattern;
 pub mod key_combo;
 pub mod keymap;
-pub mod input_pattern;
-mod input_dfa;
 
 /// Id of a keymap.
 ///
