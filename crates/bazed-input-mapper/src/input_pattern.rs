@@ -214,7 +214,7 @@ fn foo() -> InputPattern {
 
 #[test]
 fn graphviz_lol() {
-    let digit = InputPattern::Alternative((0..2).map(|x| key(&x.to_string())).collect());
+    let digit = InputPattern::Alternative((0..10).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
     let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
     let repeated_motion = seq!["count" => opt(number.clone()), "motion" => motion];
@@ -228,10 +228,8 @@ fn graphviz_lol() {
     //println!("{}", nfa.to_graphviz());
 
     let mut dfa = nfa.into_dfa();
-    println!("{}", dfa.to_graphviz());
-    //let dfa = dfa.minimize_step();
-    //let dfa = dfa.minimize_step();
-    let dfa = dfa.hopcroft_min();
+    //println!("{}", dfa.to_graphviz());
+    let dfa = dfa.minimize();
     //dfa.minimize();
 
     println!("{}", dfa.to_graphviz());
