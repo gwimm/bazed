@@ -9,7 +9,10 @@ use itertools::Itertools;
 use maplit::{hashmap, hashset};
 use uuid::Uuid;
 
-use crate::input_pattern::{Combo, InputPattern, Repetition};
+use crate::{
+    input_event::KeyInput,
+    input_pattern::{Combo, InputPattern, Repetition},
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, derive_more::Display, PartialOrd, Ord)]
 struct State(usize);
@@ -41,6 +44,34 @@ impl Nfa {
             edges: HashMap::new(),
             epsilons: HashMap::new(),
         }
+    }
+
+    pub(crate) fn test(&self, input: &[KeyInput]) -> bool {
+        let mut todo = vec![(0, self.start, hashset![])];
+        'outer: while let Some((i, state, mut epsilons_visited)) = todo.pop() {
+            if state == self.accept {
+                return true;
+            }
+            let symbol = input.get(i).cloned();
+            let edges = self.edges.get(&state);
+            if let Some(next_state) =
+                symbol.and_then(|s| edges.and_then(|e| e.get(&Combo::from_input(s))))
+            {
+                todo.push((i + 1, *next_state, hashset![]));
+            } else if let Some(epsilon_reachable) = self.epsilons.get(&state) {
+                let not_yet_visited: Vec<_> = epsilon_reachable
+                    .difference(&epsilons_visited)
+                    .copied()
+                    .collect();
+                for next_state in not_yet_visited.into_iter() {
+                    epsilons_visited.insert(next_state);
+                    todo.push((i, next_state, epsilons_visited.clone()));
+                }
+            } else {
+                continue;
+            }
+        }
+        false
     }
 
     fn into_optional(mut self) -> Self {

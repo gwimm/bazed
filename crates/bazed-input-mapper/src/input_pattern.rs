@@ -18,6 +18,7 @@ pub struct Combo {
     modifiers: Modifiers,
     key: String,
 }
+
 impl std::fmt::Debug for Combo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self}")
@@ -35,6 +36,13 @@ impl std::fmt::Display for Combo {
 }
 
 impl Combo {
+    pub fn from_input(input: KeyInput) -> Self {
+        Self {
+            modifiers: input.modifiers,
+            //TODO obviously this is not the way it will be...
+            key: input.code.0,
+        }
+    }
     pub fn from_key(k: &str) -> Self {
         Self {
             modifiers: Modifiers::empty(),
@@ -184,11 +192,11 @@ fn input() -> Vec<KeyInput> {
             key: Key("d".to_string()),
             code: RawKey("d".to_string()),
         },
-        //KeyInput {
-        //modifiers: Modifiers::empty(),
-        //key: Key("2".to_string()),
-        //code: RawKey("2".to_string()),
-        //},
+        KeyInput {
+            modifiers: Modifiers::empty(),
+            key: Key("2".to_string()),
+            code: RawKey("2".to_string()),
+        },
         KeyInput {
             modifiers: Modifiers::empty(),
             key: Key("2".to_string()),
@@ -225,6 +233,10 @@ fn graphviz_lol() {
     let mut nfa = Nfa::from_input_pattern(keymap);
 
     println!("{}", nfa.to_graphviz());
+
+    println!("{}", nfa.test(&input()));
+
+    panic!()
 }
 
 #[test]
