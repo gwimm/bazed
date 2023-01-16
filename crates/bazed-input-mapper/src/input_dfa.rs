@@ -74,6 +74,32 @@ impl Nfa {
         false
     }
 
+    pub(crate) fn simplify(&mut self) {
+        // list of tuples (<state that should be removed>, <state that should replace it>)
+        let mut remove = Vec::new();
+        for state in &self.states {
+            if self.edges.get(state).map_or(false, |x| !x.is_empty()) {
+                continue;
+            }
+            let Some(epsilons) = self.epsilons.get(state) else { continue };
+            if epsilons.len() == 1 {
+                remove.push((*state, *epsilons.iter().next().unwrap()));
+            }
+        }
+        for (state, new_target) in &remove {
+            for mut edge in self.edges.values_mut() {
+                for target in edge.values_mut().filter(|target| *target == state) {
+                    *target = *new_target;
+                }
+            }
+            for mut epsilons in self.epsilons.values_mut() {
+                if epsilons.remove(state) {
+                    epsilons.insert(*new_target);
+                }
+            }
+        }
+    }
+
     fn into_optional(mut self) -> Self {
         self.insert_epsilon(self.start, self.accept);
         self

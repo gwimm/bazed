@@ -231,6 +231,7 @@ fn graphviz_lol() {
     let keymap = alt!["action" => action, "motion" => repeated_motion.clone()];
 
     let mut nfa = Nfa::from_input_pattern(keymap);
+    nfa.simplify();
 
     println!("{}", nfa.to_graphviz());
 
