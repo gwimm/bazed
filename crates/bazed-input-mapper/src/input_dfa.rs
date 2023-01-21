@@ -35,8 +35,8 @@ pub(crate) struct Nfa {
     edges: HashMap<State, HashMap<Combo, HashSet<State>>>,
     accept: HashSet<State>,
 
-    capture_starts: HashMap<State, String>,
-    capture_ends: HashMap<State, String>,
+    capture_starts: HashMap<State, Vec<String>>,
+    capture_ends: HashMap<State, Vec<String>>,
 }
 
 impl Nfa {
@@ -88,16 +88,62 @@ impl Nfa {
             if self.accept.contains(&state) {
                 return true;
             }
-            let next = input
-                .get(i)
-                .into_iter()
-                .flat_map(move |s| self.at_edge(&state, &Combo::from_input(s.clone())))
-                .flatten();
+            let Some(sym) = input.get(i) else { return false };
+            let next = self.at_edge(&state, &Combo::from_input(sym.clone()));
+            let next = next.iter().flat_map(|x| x.iter());
             for s in next {
                 todo.push((i + 1, *s));
             }
         }
         false
+    }
+
+    pub(crate) fn get_groups<'a>(
+        &self,
+        input: &'a [KeyInput],
+    ) -> Option<HashMap<String, &'a [KeyInput]>> {
+        println!("starts: {:?}", self.capture_starts);
+        println!("ends: {:?}", self.capture_ends);
+        let mut todo = vec![(
+            0,
+            self.start,
+            HashMap::new(),
+            HashMap::<String, (usize, usize)>::new(),
+        )];
+        while let Some((i, state, mut completed_groups, mut active_groups)) = todo.pop() {
+            for started in self
+                .capture_starts
+                .get(&state)
+                .iter()
+                .flat_map(|x| x.iter())
+            {
+                active_groups.insert(started.clone(), (i, i));
+            }
+
+            for ended in self.capture_ends.get(&state).iter().flat_map(|x| x.iter()) {
+                if let Some((ended, captured)) = active_groups.remove_entry(ended) {
+                    completed_groups.insert(ended, &input[captured.0..captured.1 + 1]);
+                } else {
+                    println!("fucked: {ended:?}");
+                }
+            }
+
+            if self.accept.contains(&state) {
+                return Some(completed_groups);
+            }
+            let Some(sym) = input.get(i) else { return None };
+
+            for (_, ref mut captured) in active_groups.iter_mut() {
+                captured.1 = i;
+            }
+
+            let next = self.at_edge(&state, &Combo::from_input(sym.clone()));
+            let next = next.iter().flat_map(|x| x.iter());
+            for s in next {
+                todo.push((i + 1, *s, completed_groups.clone(), active_groups.clone()));
+            }
+        }
+        None
     }
 
     pub(crate) fn remove_dead_ends(&mut self) {
@@ -149,11 +195,11 @@ impl Nfa {
             .flat_map(|(a, trans, b)| b.iter().map(move |b| (a, trans, b)))
             .map(move |(a, trans, b)| edge_to_graphviz(a, trans, b))
             .join("\n");
-        let start = format!(r#""{}" [label="start", color="green"];"#, self.start);
+        let start = format!(r#""start" -> "{}"; "start" [style=invis]; "#, self.start);
         let end = self
             .accept
             .iter()
-            .map(|x| format!(r#""{x}" [label="accept", color="red"];"#))
+            .map(|x| format!(r#""{x}" [shape=doublecircle, color="red"];"#))
             .join("\n");
 
         format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{start}\n{end}\n}}")
@@ -282,11 +328,14 @@ impl ENfa {
         }
     }
 
-    pub(crate) fn remove_epsilons(self) -> Nfa {
+    pub(crate) fn remove_epsilons(mut self) -> Nfa {
         let mut nfa = Nfa::new(self.start);
         if self.accept == self.start {
             nfa.accept.insert(nfa.start);
         }
+
+        // mappings from old nfa to new nfa
+        let mut mappings = HashMap::new();
 
         let mut visited_eps: HashSet<(State, State)> = HashSet::new();
         let todo_epsilon = self
@@ -301,6 +350,8 @@ impl ENfa {
         while let Some((q1, via, q2)) = todo.pop_first() {
             if let Some(alpha) = via {
                 nfa.states.insert(q2);
+                mappings.insert(q2, q2);
+
                 nfa.insert_edge(q1, alpha.clone(), q2);
                 if self.accept == q2 {
                     nfa.accept.insert(q2);
@@ -308,11 +359,13 @@ impl ENfa {
 
                 for q3 in self.epsilons_from(&q2) {
                     if !nfa.has_edge(&q1, alpha, q3) {
+                        mappings.insert(q2, *q3);
                         todo.insert((q1, Some(alpha), *q3));
                     }
                 }
                 for (via2, q3) in self.edges_from(&q2) {
                     if !nfa.has_edge(&q2, via2, q3) {
+                        mappings.insert(q2, *q3);
                         todo.insert((q2, Some(via2), *q3));
                     }
                 }
@@ -324,16 +377,46 @@ impl ENfa {
 
                 for (via2, q3) in self.edges_from(&q2) {
                     if !nfa.has_edge(&q1, via2, q3) {
+                        mappings.insert(q2, *q3);
                         todo.insert((q1, Some(via2), *q3));
                     }
                 }
                 for q3 in self.epsilons_from(&q2) {
                     if !visited_eps.contains(&(q1, *q3)) {
+                        mappings.insert(q2, *q3);
                         todo.insert((q1, None, *q3));
                     }
                 }
             }
         }
+
+        println!("{mappings:?}");
+
+        for (state, name) in self.capture_starts.drain() {
+            if let Some(s) = mappings.get(&state) {
+                let mut s = s;
+                while let Some(mapped) = mappings.get(s) {
+                    if mapped == s {
+                        break;
+                    }
+                    s = mapped;
+                }
+                nfa.capture_starts.entry(*s).or_default().push(name);
+            }
+        }
+        for (state, name) in self.capture_ends.drain() {
+            if let Some(s) = mappings.get(&state) {
+                let mut s = s;
+                while let Some(mapped) = mappings.get(s) {
+                    if mapped == s {
+                        break;
+                    }
+                    s = mapped;
+                }
+                nfa.capture_ends.entry(*s).or_default().push(name);
+            }
+        }
+
         nfa
     }
 
@@ -371,12 +454,10 @@ impl ENfa {
             .map(|(a, b)| edge_to_graphviz(a, "ε", b))
             .join("\n");
 
-        let colorized = format!(
-            r#""{}" [label="start", color="green"]; "{}" [label="accept", color="red"]"#,
-            self.start, self.accept
-        );
+        let start = format!(r#""start" -> "{}"; "start" [style=invis]; "#, self.start);
+        let end = format!(r#""{}" [shape=doublecircle, color="red"];"#, self.accept);
 
-        format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{b}\n{colorized}\n}}")
+        format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{b}\n{start}\n{end}\n}}")
     }
 }
 

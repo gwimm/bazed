@@ -116,20 +116,20 @@ fn digit() -> InputPattern {
 
 fn input() -> Vec<KeyInput> {
     vec![
+        // KeyInput {
+        //     modifiers: Modifiers::empty(),
+        //     key: Key("d".to_string()),
+        //     code: RawKey("d".to_string()),
+        // },
         KeyInput {
             modifiers: Modifiers::empty(),
-            key: Key("d".to_string()),
-            code: RawKey("d".to_string()),
+            key: Key("0".to_string()),
+            code: RawKey("0".to_string()),
         },
         KeyInput {
             modifiers: Modifiers::empty(),
-            key: Key("2".to_string()),
-            code: RawKey("2".to_string()),
-        },
-        KeyInput {
-            modifiers: Modifiers::empty(),
-            key: Key("2".to_string()),
-            code: RawKey("2".to_string()),
+            key: Key("0".to_string()),
+            code: RawKey("0".to_string()),
         },
         KeyInput {
             modifiers: Modifiers::empty(),
@@ -159,7 +159,7 @@ fn foo() -> InputPattern {
 
 #[test]
 fn graphviz_lol() {
-    let digit = InputPattern::Alternative((0..2).map(|x| key(&x.to_string())).collect());
+    let digit = InputPattern::Alternative((0..1).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
     let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
     let repeated_motion = seq!["count" => opt(number), "motion" => motion];
@@ -167,7 +167,6 @@ fn graphviz_lol() {
     let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
     let keymap = alt!["action" => action, "motion" => repeated_motion.clone()];
 
-    //let mut nfa = ENfa::from_input_pattern(keymap);
     let mut nfa = ENfa::from_input_pattern(repeated_motion);
 
     println!(
@@ -180,14 +179,14 @@ fn graphviz_lol() {
         "https://dreampuf.github.io/GraphvizOnline/#{}",
         urlencoding::encode(&nfa.to_graphviz())
     );
-    nfa.simplify();
+    //nfa.simplify();
 
-    println!(
-        "https://dreampuf.github.io/GraphvizOnline/#{}",
-        urlencoding::encode(&nfa.to_graphviz())
-    );
+    //println!(
+        //"https://dreampuf.github.io/GraphvizOnline/#{}",
+        //urlencoding::encode(&nfa.to_graphviz())
+    //);
 
-    //println!("{}", nfa.test(&input()));
+    println!("{:?}", nfa.get_groups(&input()));
 
     panic!()
 }
