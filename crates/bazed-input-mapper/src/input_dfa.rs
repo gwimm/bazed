@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    convert::identity,
     sync::{atomic::AtomicUsize, LazyLock},
 };
 
@@ -67,6 +66,10 @@ impl Nfa {
             .map_or(false, |x| x.get(combo).map_or(false, |x| x.contains(s2)))
     }
 
+    fn at_edge(&self, s: &State, combo: &Combo) -> Option<&HashSet<State>> {
+        self.edges.get(s).and_then(|x| x.get(combo))
+    }
+
     fn remove_state(&mut self, s: State) {
         assert!(self.start != s);
         self.states.remove(&s);
@@ -79,13 +82,28 @@ impl Nfa {
         self.accept.remove(&s);
     }
 
+    pub(crate) fn test(&self, input: &[KeyInput]) -> bool {
+        let mut todo = vec![(0, self.start)];
+        while let Some((i, state)) = todo.pop() {
+            if self.accept.contains(&state) {
+                return true;
+            }
+            let next = input
+                .get(i)
+                .into_iter()
+                .flat_map(move |s| self.at_edge(&state, &Combo::from_input(s.clone())))
+                .flatten();
+            for s in next {
+                todo.push((i + 1, *s));
+            }
+        }
+        false
+    }
+
     pub(crate) fn remove_dead_ends(&mut self) {
         let mut remove = Vec::new();
         for s in &self.states {
-            if self.accept.contains(s) {
-                continue;
-            }
-            if self.edges.get(s).map_or(true, |x| x.is_empty()) {
+            if !self.accept.contains(s) && self.edges.get(s).map_or(true, |x| x.is_empty()) {
                 remove.push(*s);
             }
         }
@@ -97,32 +115,24 @@ impl Nfa {
     pub(crate) fn simplify(&mut self) {
         loop {
             let mut identical = Vec::new();
-            for s1 in &self.states {
-                for s2 in &self.states {
-                    if s1 == s2 {
-                        continue;
-                    }
-                    if self.edges.get(s1) == self.edges.get(s2)
-                        && self.start != *s1
-                        && (self.accept.contains(s1) == self.accept.contains(s2))
-                    {
-                        identical.push((*s1, *s2));
-                    }
+
+            for (a, b) in self.states.iter().cartesian_product(self.states.iter()) {
+                if a != b
+                    && self.edges.get(a) == self.edges.get(b)
+                    && self.start != *a
+                    && (self.accept.contains(a) == self.accept.contains(b))
+                {
+                    identical.push((*a, *b));
                 }
             }
             if identical.is_empty() {
                 return;
-            } else {
-                println!("unifying {identical:?}");
             }
-
             for (a, b) in identical {
                 if self.states.contains(&a) {
-                    for edges in self.edges.values_mut() {
-                        for targets in edges.values_mut() {
-                            if targets.remove(&b) {
-                                targets.insert(a);
-                            }
+                    for targets in self.edges.values_mut().flat_map(|x| x.values_mut()) {
+                        if targets.remove(&b) {
+                            targets.insert(a);
                         }
                     }
                     self.remove_state(b);
@@ -270,33 +280,6 @@ impl ENfa {
                 },
             },
         }
-    }
-
-    pub(crate) fn test(&self, input: &[KeyInput]) -> bool {
-        let mut todo = vec![(0, self.start, hashset![])];
-        while let Some((i, state, mut epsilons_visited)) = todo.pop() {
-            if state == self.accept {
-                return true;
-            }
-            let symbol = input.get(i).cloned();
-            if let Some(next) = symbol.and_then(|s| self.at_edge(&state, &Combo::from_input(s))) {
-                for s in next {
-                    todo.push((i + 1, *s, hashset![]));
-                }
-            } else if let Some(epsilon_reachable) = self.epsilons.get(&state) {
-                let not_yet_visited: Vec<_> = epsilon_reachable
-                    .difference(&epsilons_visited)
-                    .copied()
-                    .collect();
-                for next_state in not_yet_visited.into_iter() {
-                    epsilons_visited.insert(next_state);
-                    todo.push((i, next_state, epsilons_visited.clone()));
-                }
-            } else {
-                continue;
-            }
-        }
-        false
     }
 
     pub(crate) fn remove_epsilons(self) -> Nfa {

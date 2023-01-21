@@ -142,8 +142,8 @@ fn input() -> Vec<KeyInput> {
 pub fn fuck() {
     let enfa = ENfa::from_input_pattern(InputPattern::Combo(Combo::from_key("a")));
     _ = enfa.to_graphviz();
-    enfa.test(&[]);
     let nfa = enfa.remove_epsilons();
+    nfa.test(&[]);
     _ = nfa.to_graphviz();
 }
 
@@ -159,22 +159,33 @@ fn foo() -> InputPattern {
 
 #[test]
 fn graphviz_lol() {
-    let digit = InputPattern::Alternative((0..3).map(|x| key(&x.to_string())).collect());
+    let digit = InputPattern::Alternative((0..2).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
     let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
     let repeated_motion = seq!["count" => opt(number), "motion" => motion];
     let verb = alt!["delete" => key("d"), "change" => key("c")];
     let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
-    let keymap = alt!["action" => action, "motion" => repeated_motion];
+    let keymap = alt!["action" => action, "motion" => repeated_motion.clone()];
 
-    let mut nfa = ENfa::from_input_pattern(keymap);
+    //let mut nfa = ENfa::from_input_pattern(keymap);
+    let mut nfa = ENfa::from_input_pattern(repeated_motion);
 
-    println!("{}", nfa.to_graphviz());
+    println!(
+        "https://dreampuf.github.io/GraphvizOnline/#{}",
+        urlencoding::encode(&nfa.to_graphviz())
+    );
     let mut nfa = nfa.remove_epsilons();
     nfa.remove_dead_ends();
-    println!("{}", nfa.to_graphviz());
+    println!(
+        "https://dreampuf.github.io/GraphvizOnline/#{}",
+        urlencoding::encode(&nfa.to_graphviz())
+    );
     nfa.simplify();
-    println!("{}", nfa.to_graphviz());
+
+    println!(
+        "https://dreampuf.github.io/GraphvizOnline/#{}",
+        urlencoding::encode(&nfa.to_graphviz())
+    );
 
     //println!("{}", nfa.test(&input()));
 
