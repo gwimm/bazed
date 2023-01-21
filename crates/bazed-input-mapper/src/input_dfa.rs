@@ -1,21 +1,25 @@
-#![allow(unused)]
-
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    convert::identity,
     sync::{atomic::AtomicUsize, LazyLock},
 };
 
 use itertools::Itertools;
-use maplit::{hashmap, hashset};
-use uuid::Uuid;
+use maplit::hashset;
 
 use crate::{
     input_event::KeyInput,
     input_pattern::{Combo, InputPattern, Repetition},
 };
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, derive_more::Display, PartialOrd, Ord)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, derive_more::Display, PartialOrd, Ord)]
 struct State(usize);
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
+    }
+}
 
 impl State {
     fn new() -> Self {
@@ -24,43 +28,142 @@ impl State {
         State(COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
     }
 }
-
-#[derive(Eq, PartialEq, Clone, Debug)]
-pub(crate) struct Group {
-    start: State,
-    end: State,
-    sub: HashMap<String, Group>,
-}
-
-impl Group {
-    fn to_graphviz(&self, nfa: &Nfa, name: &str) -> String {
-        format!(
-            "subgraph cluster_{name}{} {{ label=\"{name}\"; {};\n{} }}",
-            Uuid::new_v4().as_u128(),
-            nfa.reachable_between(self.start, self.end)
-                .iter()
-                .join("\n"),
-            self.sub
-                .iter()
-                .map(|(name, group)| group.to_graphviz(nfa, name))
-                .join("\n")
-        )
-    }
-}
-
 //TODO clone lmao
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Nfa {
     start: State,
     states: HashSet<State>,
-    edges: HashMap<State, HashMap<Combo, State>>,
-    epsilons: HashMap<State, HashSet<State>>,
-    accept: State,
+    edges: HashMap<State, HashMap<Combo, HashSet<State>>>,
+    accept: HashSet<State>,
 
-    captures: HashMap<String, Group>,
+    capture_starts: HashMap<State, String>,
+    capture_ends: HashMap<State, String>,
 }
 
 impl Nfa {
+    fn new(start: State) -> Self {
+        Self {
+            start,
+            accept: hashset![],
+            states: hashset![start],
+            edges: HashMap::new(),
+            capture_starts: HashMap::new(),
+            capture_ends: HashMap::new(),
+        }
+    }
+
+    fn insert_edge(&mut self, from: State, combo: Combo, to: State) {
+        self.edges
+            .entry(from)
+            .or_default()
+            .entry(combo)
+            .or_default()
+            .insert(to);
+    }
+
+    fn has_edge(&self, s: &State, combo: &Combo, s2: &State) -> bool {
+        self.edges
+            .get(s)
+            .map_or(false, |x| x.get(combo).map_or(false, |x| x.contains(s2)))
+    }
+
+    fn remove_state(&mut self, s: State) {
+        assert!(self.start != s);
+        self.states.remove(&s);
+        self.edges.remove(&s);
+        for edges in self.edges.values_mut() {
+            for targets in edges.values_mut() {
+                targets.remove(&s);
+            }
+        }
+        self.accept.remove(&s);
+    }
+
+    pub(crate) fn remove_dead_ends(&mut self) {
+        let mut remove = Vec::new();
+        for s in &self.states {
+            if self.accept.contains(s) {
+                continue;
+            }
+            if self.edges.get(s).map_or(true, |x| x.is_empty()) {
+                remove.push(*s);
+            }
+        }
+        for s in remove {
+            self.remove_state(s);
+        }
+    }
+
+    pub(crate) fn simplify(&mut self) {
+        loop {
+            let mut identical = Vec::new();
+            for s1 in &self.states {
+                for s2 in &self.states {
+                    if s1 == s2 {
+                        continue;
+                    }
+                    if self.edges.get(s1) == self.edges.get(s2)
+                        && self.start != *s1
+                        && (self.accept.contains(s1) == self.accept.contains(s2))
+                    {
+                        identical.push((*s1, *s2));
+                    }
+                }
+            }
+            if identical.is_empty() {
+                return;
+            } else {
+                println!("unifying {identical:?}");
+            }
+
+            for (a, b) in identical {
+                if self.states.contains(&a) {
+                    for edges in self.edges.values_mut() {
+                        for targets in edges.values_mut() {
+                            if targets.remove(&b) {
+                                targets.insert(a);
+                            }
+                        }
+                    }
+                    self.remove_state(b);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn to_graphviz(&self) -> String {
+        let a = self
+            .edges
+            .iter()
+            .flat_map(|(a, paths)| paths.iter().map(move |(trans, b)| (a, trans, b)))
+            .flat_map(|(a, trans, b)| b.iter().map(move |b| (a, trans, b)))
+            .map(move |(a, trans, b)| edge_to_graphviz(a, trans, b))
+            .join("\n");
+        let start = format!(r#""{}" [label="start", color="green"];"#, self.start);
+        let end = self
+            .accept
+            .iter()
+            .map(|x| format!(r#""{x}" [label="accept", color="red"];"#))
+            .join("\n");
+
+        format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{start}\n{end}\n}}")
+    }
+}
+
+//TODO clone lmao
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct ENfa {
+    start: State,
+    states: HashSet<State>,
+    edges: HashMap<State, HashMap<Combo, HashSet<State>>>,
+    epsilons: HashMap<State, HashSet<State>>,
+    accept: State,
+
+    capture_starts: HashMap<State, String>,
+    capture_ends: HashMap<State, String>,
+}
+
+impl ENfa {
     fn new(start: State, accept: State) -> Self {
         Self {
             start,
@@ -68,7 +171,8 @@ impl Nfa {
             states: hashset![start, accept],
             edges: HashMap::new(),
             epsilons: HashMap::new(),
-            captures: HashMap::new(),
+            capture_starts: HashMap::new(),
+            capture_ends: HashMap::new(),
         }
     }
 
@@ -82,19 +186,41 @@ impl Nfa {
     }
 
     fn insert_edge(&mut self, from: State, combo: Combo, to: State) {
-        self.edges.entry(from).or_default().insert(combo, to);
+        self.edges
+            .entry(from)
+            .or_default()
+            .entry(combo)
+            .or_default()
+            .insert(to);
+    }
+
+    fn at_edge(&self, s: &State, combo: &Combo) -> Option<&HashSet<State>> {
+        self.edges.get(s).and_then(|x| x.get(combo))
+    }
+
+    fn edges_from(&self, s: &State) -> impl Iterator<Item = (&Combo, &State)> {
+        self.edges
+            .get(s)
+            .into_iter()
+            .flat_map(|x| x.iter())
+            .flat_map(|(a, b)| b.iter().map(move |b| (a, b)))
+    }
+
+    fn epsilons_from(&self, s: &State) -> impl Iterator<Item = &State> {
+        self.epsilons.get(s).into_iter().flat_map(|x| x.iter())
     }
 
     /// Extend this NFA by another NFA, adding its states, edges and epsilons.
     /// start and accepting states are unaffected
-    fn extend(&mut self, other: Nfa) {
+    fn extend(&mut self, other: ENfa) {
         self.states.extend(other.states);
         self.edges.extend(other.edges);
         self.epsilons.extend(other.epsilons);
-        self.captures.extend(other.captures);
+        self.capture_starts.extend(other.capture_starts);
+        self.capture_ends.extend(other.capture_ends);
     }
 
-    pub(crate) fn from_input_pattern(pattern: InputPattern) -> Nfa {
+    pub(crate) fn from_input_pattern(pattern: InputPattern) -> ENfa {
         match pattern {
             InputPattern::Combo(combo) => {
                 let mut nfa = Self::new(State::new(), State::new());
@@ -102,18 +228,14 @@ impl Nfa {
                 nfa
             },
             InputPattern::Capture(name, pat) => {
-                let mut nfa = Nfa::from_input_pattern(*pat);
-                let group = Group {
-                    start: nfa.start,
-                    end: nfa.accept,
-                    sub: nfa.captures,
-                };
-                nfa.captures = hashmap! { name => group };
+                let mut nfa = ENfa::from_input_pattern(*pat);
+                nfa.capture_starts.insert(nfa.start, name.to_string());
+                nfa.capture_ends.insert(nfa.accept, name);
                 nfa
             },
             InputPattern::Alternative(options) => {
-                let mut new = Nfa::new(State::new(), State::new());
-                for sub in options.into_iter().map(Nfa::from_input_pattern) {
+                let mut new = ENfa::new(State::new(), State::new());
+                for sub in options.into_iter().map(ENfa::from_input_pattern) {
                     new.insert_epsilon(new.start, sub.start);
                     new.insert_epsilon(sub.accept, new.accept);
                     new.extend(sub);
@@ -124,8 +246,8 @@ impl Nfa {
                 let start = State::new();
                 // we start the nfa out with having the start state be accepting,
                 // but then shift the accept state further to the end with every step of the seq
-                let mut new = Nfa::new(start, start);
-                for sub in seq.into_iter().map(Nfa::from_input_pattern) {
+                let mut new = ENfa::new(start, start);
+                for sub in seq.into_iter().map(ENfa::from_input_pattern) {
                     // Make the current end-state point to the sub-nfas start state
                     new.insert_epsilon(new.accept, sub.start);
                     // set the end of the sub-nfa to be the end of the seq-nfa
@@ -135,14 +257,14 @@ impl Nfa {
                 new
             },
             InputPattern::Repeat(rep, pat) => match rep {
-                Repetition::Optional => Nfa::from_input_pattern(*pat).into_optional(),
+                Repetition::Optional => ENfa::from_input_pattern(*pat).into_optional(),
                 Repetition::ZeroOrMore => {
-                    let mut nfa = Nfa::from_input_pattern(*pat).into_optional();
+                    let mut nfa = ENfa::from_input_pattern(*pat).into_optional();
                     nfa.insert_epsilon(nfa.accept, nfa.start);
                     nfa
                 },
                 Repetition::OneOrMore => {
-                    let mut nfa = Nfa::from_input_pattern(*pat);
+                    let mut nfa = ENfa::from_input_pattern(*pat);
                     nfa.insert_epsilon(nfa.accept, nfa.start);
                     nfa
                 },
@@ -157,11 +279,10 @@ impl Nfa {
                 return true;
             }
             let symbol = input.get(i).cloned();
-            let edges = self.edges.get(&state);
-            if let Some(next_state) =
-                symbol.and_then(|s| edges.and_then(|e| e.get(&Combo::from_input(s))))
-            {
-                todo.push((i + 1, *next_state, hashset![]));
+            if let Some(next) = symbol.and_then(|s| self.at_edge(&state, &Combo::from_input(s))) {
+                for s in next {
+                    todo.push((i + 1, *s, hashset![]));
+                }
             } else if let Some(epsilon_reachable) = self.epsilons.get(&state) {
                 let not_yet_visited: Vec<_> = epsilon_reachable
                     .difference(&epsilons_visited)
@@ -178,30 +299,59 @@ impl Nfa {
         false
     }
 
-    pub(crate) fn simplify(&mut self) {
-        // list of tuples (<state that should be removed>, <state that should replace it>)
-        let mut remove = Vec::new();
-        for state in &self.states {
-            if self.edges.get(state).map_or(false, |x| !x.is_empty()) {
-                continue;
-            }
-            let Some(epsilons) = self.epsilons.get(state) else { continue };
-            if epsilons.len() == 1 {
-                remove.push((*state, *epsilons.iter().next().unwrap()));
-            }
+    pub(crate) fn remove_epsilons(self) -> Nfa {
+        let mut nfa = Nfa::new(self.start);
+        if self.accept == self.start {
+            nfa.accept.insert(nfa.start);
         }
-        for (state, new_target) in &remove {
-            for mut edge in self.edges.values_mut() {
-                for target in edge.values_mut().filter(|target| *target == state) {
-                    *target = *new_target;
+
+        let mut visited_eps: HashSet<(State, State)> = HashSet::new();
+        let todo_epsilon = self
+            .epsilons_from(&self.start)
+            .map(|x| (self.start, None, *x));
+        let mut todo: BTreeSet<_> = self
+            .edges_from(&self.start)
+            .map(|x| (self.start, Some(x.0), *x.1))
+            .chain(todo_epsilon)
+            .collect();
+
+        while let Some((q1, via, q2)) = todo.pop_first() {
+            if let Some(alpha) = via {
+                nfa.states.insert(q2);
+                nfa.insert_edge(q1, alpha.clone(), q2);
+                if self.accept == q2 {
+                    nfa.accept.insert(q2);
+                }
+
+                for q3 in self.epsilons_from(&q2) {
+                    if !nfa.has_edge(&q1, alpha, q3) {
+                        todo.insert((q1, Some(alpha), *q3));
+                    }
+                }
+                for (via2, q3) in self.edges_from(&q2) {
+                    if !nfa.has_edge(&q2, via2, q3) {
+                        todo.insert((q2, Some(via2), *q3));
+                    }
+                }
+            } else {
+                visited_eps.insert((q1, q2));
+                if self.accept == q2 {
+                    nfa.accept.insert(q1);
+                }
+
+                for (via2, q3) in self.edges_from(&q2) {
+                    if !nfa.has_edge(&q1, via2, q3) {
+                        todo.insert((q1, Some(via2), *q3));
+                    }
+                }
+                for q3 in self.epsilons_from(&q2) {
+                    if !visited_eps.contains(&(q1, *q3)) {
+                        todo.insert((q1, None, *q3));
+                    }
                 }
             }
-            for mut epsilons in self.epsilons.values_mut() {
-                if epsilons.remove(state) {
-                    epsilons.insert(*new_target);
-                }
-            }
         }
+        nfa
     }
 
     fn reachable_between(&self, start: State, end: State) -> Vec<State> {
@@ -217,12 +367,8 @@ impl Nfa {
             if next == end {
                 continue;
             }
-            if let Some(edges) = self.edges.get(&next) {
-                todo.extend(edges.values());
-            }
-            if let Some(epsilons) = self.epsilons.get(&next) {
-                todo.extend(epsilons);
-            }
+            todo.extend(self.edges_from(&next).map(|x| x.1));
+            todo.extend(self.epsilons_from(&next));
         }
         reachable
     }
@@ -232,6 +378,7 @@ impl Nfa {
             .edges
             .iter()
             .flat_map(|(a, paths)| paths.iter().map(move |(trans, b)| (a, trans, b)))
+            .flat_map(|(a, trans, b)| b.iter().map(move |b| (a, trans, b)))
             .map(move |(a, trans, b)| edge_to_graphviz(a, trans, b))
             .join("\n");
         let b = self
@@ -245,13 +392,8 @@ impl Nfa {
             r#""{}" [label="start", color="green"]; "{}" [label="accept", color="red"]"#,
             self.start, self.accept
         );
-        let subgraphs = self
-            .captures
-            .iter()
-            .map(|(name, group)| group.to_graphviz(self, name))
-            .join("\n");
 
-        format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{b}\n{colorized}\n{subgraphs}\n}}")
+        format!("digraph G {{\nrankdir = TB; node [shape = circle]; edge [weight = 2]; node [width = 0.3]; \n{a}\n{b}\n{colorized}\n}}")
     }
 }
 

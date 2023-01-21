@@ -9,11 +9,11 @@ use dyn_clone::DynClone;
 use itertools::Itertools;
 
 use crate::{
-    input_dfa::Nfa,
+    input_dfa::ENfa,
     input_event::{Key, KeyInput, Modifiers, RawKey},
 };
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Combo {
     modifiers: Modifiers,
     key: String,
@@ -75,77 +75,6 @@ pub enum InputPattern {
     Alternative(Vec<InputPattern>),
     Sequence(Vec<InputPattern>),
     Repeat(Repetition, Box<InputPattern>),
-}
-
-// TODO yeet this, this is bad and wrong, because missing backtracking
-impl InputPattern {
-    pub fn parse(
-        &self,
-        inputs: &mut Peekable<impl Iterator<Item = KeyInput>>,
-    ) -> Option<InputMatch> {
-        match self {
-            InputPattern::Combo(c) => {
-                if c.matches(inputs.peek()?) {
-                    Some(InputMatch::KeyInput(inputs.next().unwrap()))
-                } else {
-                    None
-                }
-            },
-            InputPattern::Alternative(options) => options
-                .iter()
-                .find_map(|pat| pat.parse(inputs))
-                .map(|m| InputMatch::Alternative(Box::new(m))),
-            InputPattern::Sequence(elems) => elems
-                .iter()
-                .map(|pat| pat.parse(inputs))
-                .collect::<Option<Vec<InputMatch>>>()
-                .map(|entries| InputMatch::Sequence(entries.into_iter().collect())),
-            InputPattern::Repeat(rep, pat) => match rep {
-                Repetition::Optional => Some(InputMatch::Sequence(
-                    pat.parse(inputs).map(|x| vec![x]).unwrap_or_default(),
-                )),
-                Repetition::ZeroOrMore => {
-                    let res = iter::from_fn(|| pat.parse(inputs)).collect();
-                    Some(InputMatch::Sequence(res))
-                },
-                Repetition::OneOrMore => {
-                    let res: Vec<_> = iter::from_fn(|| pat.parse(inputs)).collect();
-                    (!res.is_empty()).then_some(InputMatch::Sequence(res))
-                },
-            },
-            InputPattern::Capture(name, pat) => Some(InputMatch::Capture(
-                name.to_string(),
-                Box::new(pat.parse(inputs)?),
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum InputMatch {
-    KeyInput(KeyInput),
-    Capture(String, Box<InputMatch>),
-    Alternative(Box<InputMatch>),
-    Sequence(Vec<InputMatch>),
-}
-
-impl InputMatch {
-    fn unwrap_key_input(&self) -> &KeyInput {
-        let Self::KeyInput(x) = self else { panic!("{self:?} was not a KeyInput") };
-        x
-    }
-    fn unwrap_alt(&self) -> &InputMatch {
-        let Self::Alternative(x) = self else { panic!("{self:?} was not an Alternative") };
-        x
-    }
-    fn unwrap_seq(&self) -> &Vec<InputMatch> {
-        let Self::Sequence(x) = self else { panic!("{self:?} was not a Sequence") };
-        x
-    }
-    fn unwrap_capture(&self) -> (&str, &InputMatch) {
-        let Self::Capture(x, x1) = self else { panic!("{self:?} was not a Capture") };
-        (x, x1)
-    }
 }
 
 impl std::fmt::Debug for InputPattern {
@@ -210,6 +139,14 @@ fn input() -> Vec<KeyInput> {
     ]
 }
 
+pub fn fuck() {
+    let enfa = ENfa::from_input_pattern(InputPattern::Combo(Combo::from_key("a")));
+    _ = enfa.to_graphviz();
+    enfa.test(&[]);
+    let nfa = enfa.remove_epsilons();
+    _ = nfa.to_graphviz();
+}
+
 fn foo() -> InputPattern {
     let digit = InputPattern::Alternative((0..2).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
@@ -222,24 +159,24 @@ fn foo() -> InputPattern {
 
 #[test]
 fn graphviz_lol() {
-    let digit = InputPattern::Alternative((0..2).map(|x| key(&x.to_string())).collect());
+    let digit = InputPattern::Alternative((0..3).map(|x| key(&x.to_string())).collect());
     let number = many1(digit);
     let motion = alt!["next_word" => key("w"), "prev_word" => key("b")];
-    let repeated_motion = seq!["count" => opt(number.clone()), "motion" => motion];
+    let repeated_motion = seq!["count" => opt(number), "motion" => motion];
     let verb = alt!["delete" => key("d"), "change" => key("c")];
     let action = seq!["verb" => verb, "motion" => repeated_motion.clone()];
-    let keymap = alt!["action" => action, "motion" => repeated_motion.clone()];
+    let keymap = alt!["action" => action, "motion" => repeated_motion];
 
-    let mut nfa = Nfa::from_input_pattern(keymap);
-    //nfa.simplify();
-    //nfa.simplify();
-    //nfa.simplify();
-    //nfa.simplify();
-    //nfa.simplify();
+    let mut nfa = ENfa::from_input_pattern(keymap);
 
     println!("{}", nfa.to_graphviz());
+    let mut nfa = nfa.remove_epsilons();
+    nfa.remove_dead_ends();
+    println!("{}", nfa.to_graphviz());
+    nfa.simplify();
+    println!("{}", nfa.to_graphviz());
 
-    println!("{}", nfa.test(&input()));
+    //println!("{}", nfa.test(&input()));
 
     panic!()
 }
@@ -248,7 +185,6 @@ fn graphviz_lol() {
 fn test_foo() {
     let pattern = foo();
     let input = input();
-    let res = pattern.parse(&mut input.into_iter().peekable()).unwrap();
 
     #[derive(Debug)]
     enum Motion {
@@ -260,53 +196,5 @@ fn test_foo() {
         Delete,
         Change,
     }
-
-    fn interpret_number(m: &InputMatch) -> usize {
-        m.unwrap_seq()
-            .iter()
-            .flat_map(|x| x.unwrap_seq().iter())
-            .map(|x| x.unwrap_key_input().key.as_str())
-            .join("")
-            .parse::<usize>()
-            .unwrap()
-    }
-
-    fn interpret_repeated_motion(m: &InputMatch) -> (usize, Motion) {
-        let m = m.unwrap_seq();
-        let m: HashMap<_, _> = m.iter().map(|x| x.unwrap_capture()).collect();
-        let count = interpret_number(m["count"]);
-        let motion = match m["motion"].unwrap_alt().unwrap_capture().0 {
-            "next_word" => Motion::NextWord,
-            "prev_word" => Motion::PrevWord,
-            _ => unreachable!(),
-        };
-        (count, motion)
-    }
-
-    fn interpret_verb(m: &InputMatch) -> Verb {
-        match m.unwrap_alt().unwrap_capture().0 {
-            "delete" => Verb::Delete,
-            "change" => Verb::Change,
-            _ => unreachable!(),
-        }
-    }
-
-    let alternative = res.unwrap_alt().unwrap_capture();
-    match alternative.0 {
-        "action" => {
-            let s = alternative.1.unwrap_seq();
-            let s: HashMap<_, _> = s.iter().map(|x| x.unwrap_capture()).collect();
-            let verb = interpret_verb(s["verb"]);
-            let motion = interpret_repeated_motion(s["motion"]);
-            println!("Action: {verb:?} {motion:?}");
-        },
-        "motion" => {
-            let motion = interpret_repeated_motion(alternative.1);
-            println!("Move: {motion:?}");
-        },
-        _ => unreachable!(),
-    }
-
-    //println!("{:#?}", res);
-    panic!();
+    panic!()
 }
