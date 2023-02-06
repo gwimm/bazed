@@ -3,6 +3,20 @@
 version = 3
 
 [[package]]
+name = "acceptor"
+version = "0.0.0"
+dependencies = [
+ "derive_more",
+ "extend",
+ "maplit",
+ "nonempty",
+ "serde",
+ "thiserror",
+ "unicode-general-category",
+ "uuid 1.2.2",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -675,6 +689,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9852635589dc9f9ea1b6fe9f05b50ef208c85c834a562f0c6abb1c475736ec2b"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "extend"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c5216e387a76eebaaf11f6d871ec8a4aae0b25f05456ee21f228e024b1b3610"
+dependencies = [
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
