@@ -1,5 +1,6 @@
 #![feature(once_cell)]
 #![feature(let_chains)]
+#![feature(hash_drain_filter)]
 #![feature(extend_one)]
 #![forbid(unreachable_pub)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -12,4 +13,5 @@ mod common;
 pub mod enfa;
 pub mod nfa;
 pub mod regex;
+pub mod tdfa;
 pub mod tenfa;

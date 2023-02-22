@@ -3,11 +3,7 @@ use std::{
     hash::Hash,
 };
 
-use crate::{
-    common::Id,
-    enfa::Enfa,
-    regex::Regex,
-};
+use crate::{common::Id, enfa::Enfa, regex::Regex};
 
 type State = Id;
 type EdgeId = Id;

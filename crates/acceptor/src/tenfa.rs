@@ -1,12 +1,15 @@
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::Ordering,
+    collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
     ops::Range,
 };
 
-use crate::common::Id;
+use itertools::Itertools;
 
-type State = Id;
+use crate::common::{IterExt, Id};
+
+pub(crate) type State = Id;
 
 #[derive(Clone)]
 pub enum Regex<A> {
@@ -33,13 +36,18 @@ pub fn alt<A>(lhs: Regex<A>, rhs: Regex<A>) -> Regex<A> {
     Regex::Alternative(Box::new(lhs), Box::new(rhs))
 }
 
+pub fn sequence<A, I: IntoIterator<Item = Regex<A>>>(iter: I) -> Option<Regex<A>> {
+    iter.into_iter()
+        .reduce(|acc, rx| Regex::Alternative(Box::new(acc), Box::new(rx)))
+}
+
 pub fn seq<A>(rx1: Regex<A>, rx2: Regex<A>) -> Regex<A> {
     Regex::Sequence(Box::new(rx1), Box::new(rx2))
 }
 
 #[cfg(test)]
 mod regex_test {
-    use super::{alt, many, many1, seq, Regex};
+    use super::{alt, many, seq, sequence, Regex};
 
     pub(crate) fn digit() -> Regex<char> {
         let mut iter = ('0'..'9').into_iter().map(|c| Regex::Symbol(c));
@@ -56,37 +64,302 @@ mod regex_test {
     }
 
     pub(crate) fn number() -> Regex<char> {
-        seq(digit(), many(digit()))
+        seq(digit1(), many(digit()))
     }
 
     pub(crate) fn re2c_paper() -> Regex<char> {
         let a = Regex::Symbol('a');
         let b = Regex::Symbol('b');
+        // let an = many(sequence([Regex::Tag, a.clone(), Regex::Tag]).unwrap());
+        // let ab = alt(a, seq(b.clone(), Regex::Tag));
+        // sequence([an, Regex::Tag, ab, Regex::Tag, many(b)]).unwrap()
         let an = many(seq(Regex::Tag, seq(a.clone(), Regex::Tag)));
-        let ab = alt(a, seq(b.clone(), Regex::Tag));
-        let bn = seq(Regex::Tag, many(b));
-        seq(an, seq(ab, bn))
+        let ab = alt(a, seq(Regex::Tag, b.clone()));
+        seq(an, seq(Regex::Tag, seq(ab, seq(Regex::Tag, many(b)))))
     }
 
     pub(crate) fn wikipedia() -> Regex<char> {
         let t = Regex::Tag;
         let a = Regex::Symbol('a');
         let b = Regex::Symbol('b');
-        alt(seq(many(a.clone()), seq(t, many(b.clone()))), seq(a, b))
+        alt(sequence([a.clone(), t, many(b.clone())]).unwrap(), seq(a, b))
+    }
+}
+
+#[derive(Hash, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Epsilon {
+    Tagged(bool, usize),
+    Epsilon(usize),
+}
+
+impl Epsilon {
+    pub(crate) fn tagged(self) -> Option<(bool, usize)> {
+        if let Self::Tagged(sign, tag) = self {
+            Some((sign, tag))
+        } else {
+            None
+        }
     }
 }
 
 #[derive(Hash, Clone, PartialEq, Eq)]
-enum Edge<A> {
-    Step(A),
-    Epsilon(Option<(bool, usize)>),
+pub(crate) enum Edge<A> {
+    Deter(A),
+    Epsilon(Epsilon),
 }
 
-pub struct Tenfa<A: Hash + Eq> {
-    start: State,
-    accept: State,
-    tag_count: usize,
-    transitions: HashMap<State, HashMap<Edge<A>, HashSet<State>>>,
+impl<A> Edge<A> {
+    fn new_epsilon(priority: usize) -> Edge<A> {
+        Edge::Epsilon(Epsilon::Epsilon(priority))
+    }
+
+    fn new_tag(sign: bool, tag: usize) -> Edge<A> {
+        Edge::Epsilon(Epsilon::Tagged(sign, tag))
+    }
+
+    pub(crate) fn as_ref(&self) -> Edge<&A> {
+        match self {
+            Edge::Deter(a) => Edge::Deter(a),
+            Edge::Epsilon(e) => Edge::Epsilon(*e),
+        }
+    }
+
+    pub(crate) fn tagged(self) -> Option<(bool, usize)> {
+        self.epsilon().and_then(|e| e.tagged())
+    }
+
+    pub(crate) fn epsilon(self) -> Option<Epsilon> {
+        if let Self::Epsilon(edge) = self {
+            Some(edge)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn deter(self) -> Option<A> {
+        if let Self::Deter(a) = self {
+            Some(a)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn is_deter(&self) -> bool {
+        self.as_ref().deter().is_some()
+    }
+}
+
+type Delta<A> = (State, Edge<A>, State);
+
+#[derive(Clone)]
+pub(crate) struct Deltas<A>(pub(crate) HashMap<State, HashMap<Edge<A>, State>>);
+
+impl<A: Eq + Hash> Extend<Delta<A>> for Deltas<A> {
+    fn extend<T: IntoIterator<Item = Delta<A>>>(&mut self, iter: T) {
+        for edge in iter {
+            self.extend_one(edge);
+        }
+    }
+
+    fn extend_one(&mut self, (src, edge, dst): Delta<A>) {
+        self.0.entry(src).or_default().insert(edge, dst);
+    }
+}
+
+impl<A: Eq + Hash> Extend<(State, HashMap<Edge<A>, State>)> for Deltas<A> {
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = (State, HashMap<Edge<A>, State>)>,
+    {
+        for (src, steps) in iter {
+            let transitions = self.0.entry(src).or_default();
+            transitions.extend(steps);
+        }
+    }
+}
+
+struct EdgesDrain<'a, A> {
+    togo: VecDeque<(State, Edge<A>, State)>,
+    edges: &'a mut Deltas<A>,
+}
+
+impl<'a, A> Iterator for EdgesDrain<'a, A> {
+    type Item = Delta<A>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.togo
+            .pop_front()
+            .map(|(src, src_mid, mid)| {
+                self.edges.drain(&mid)
+                    .reversed()
+                    .map(|(mid_dst, dst)| (mid, mid_dst, dst))
+                    .for_each(|x| self.togo.push_back(x));
+
+                (src, src_mid, mid)
+            })
+    }
+}
+
+struct EpsilonClosure<'a, A> {
+    togo: VecDeque<(State, Epsilon, State)>,
+    edges: &'a mut Deltas<A>,
+}
+
+impl<'a, A> Iterator for EpsilonClosure<'a, A> {
+    type Item = (State, Epsilon, State);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.togo
+            .pop_front()
+            .map(|(src, src_mid, mid)| {
+                self.edges
+                    .drain_epsilons(&mid)
+                    .reversed()
+                    .for_each(|(mid_dst, dst)| self.togo.push_back((mid, mid_dst, dst)));
+
+                (src, src_mid, mid)
+            })
+    }
+}
+
+impl<A> Deltas<A> {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub(crate) fn drain_traverse<'a>(&'a mut self, src: &State)
+        -> impl 'a + Iterator<Item = Delta<A>> {
+        EdgesDrain {
+            togo: self.drain(src).map(|(edge, dst)| (*src, edge, dst)).collect(),
+            edges: self,
+        }
+    }
+
+    pub(crate) fn drain_epsilon_closure<'a>(&'a mut self, src: &State)
+        -> impl 'a + Iterator<Item = (State, Epsilon, State)> {
+        EpsilonClosure {
+            togo: self.drain_epsilons(src).map(|(edge, dst)| (*src, edge, dst)).collect(),
+            edges: self,
+        }
+    }
+
+    pub(crate) fn drain(&mut self, src: &State) -> impl Iterator<Item = (Edge<A>, State)> {
+        self.0
+            .remove(src)
+            .into_iter()
+            .flatten()
+            .sorted_unstable_by(|(lhs, _), (rhs, _)| match (lhs, rhs) {
+                (Edge::Epsilon(Epsilon::Epsilon(lhs)), Edge::Epsilon(Epsilon::Epsilon(rhs))) => {
+                    lhs.cmp(rhs)
+                },
+                _ => Ordering::Equal,
+            })
+    }
+
+    pub(crate) fn drain_epsilons(&mut self, src: &State) -> impl Iterator<Item = (Epsilon, State)> {
+        self.drain(src)
+            .filter_map(|(mid_dst, dst)| mid_dst.epsilon().map(|mid_dst| (mid_dst, dst)))
+    }
+}
+
+impl<A: Eq + Hash> Deltas<A> {
+    pub(crate) fn into_set(self) -> HashSet<(State, Edge<A>, State)> {
+        self.0
+            .into_iter()
+            .flat_map(|(src, step)| step.into_iter().map(move |(edge, dst)| (src, edge, dst)))
+            .collect()
+    }
+
+    pub(crate) fn iter_from(&self, src: &State) -> impl Iterator<Item = (Edge<&A>, State)> {
+        self.as_ref().drain(src)
+    }
+
+    pub(crate) fn as_ref(&self) -> Deltas<&A> {
+        let delta = self
+            .0
+            .iter()
+            .map(|(id, steps)| {
+                (
+                    *id,
+                    steps
+                        .into_iter()
+                        .map(|(edge, dst)| (edge.as_ref(), *dst))
+                        .collect(),
+                )
+            })
+            .collect();
+
+        Deltas(delta)
+    }
+
+    fn step_from(&self, src: &State, sym: &A) -> Option<State> {
+        self.steps_from(src).get(sym).copied()
+    }
+
+    fn steps_from(&self, src: &State) -> HashMap<&A, State> {
+        self.iter_from(src)
+            .filter_map(|(edge, dst)| edge.deter().map(|step| (step, dst)))
+            .collect()
+    }
+
+    fn epsilons_from(&self, src: &State) -> HashMap<Epsilon, State> {
+        self.iter_from(src)
+            .filter_map(|(edge, dst)| edge.epsilon().map(|e| (e, dst)))
+            .collect()
+    }
+
+    pub(crate) fn step_simulation(&self, sim: Simulation, sym: &A) -> Simulation {
+        Simulation {
+            offset: sim.offset + 1,
+            configs: sim
+                .configs
+                .into_iter()
+                .filter_map(|(src, rs)| self.step_from(&src, sym).map(move |dst| (dst, rs.clone())))
+                .map(move |(state, rs)| (state.clone(), rs))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn epsilon_closure(&self, accept: &State, sim: Simulation) -> Simulation {
+        let mut stack = sim.configs;
+        stack.reverse();
+
+        let mut cfgs = Vec::new();
+        while let Some((src, src_regs)) = stack.pop() {
+            cfgs.push((src, src_regs.clone()));
+
+            let dst_cfgs = self
+                .epsilons_from(&src)
+                .into_iter()
+                .filter(|(_, dst)| cfgs.iter().any(|(state, _)| state == dst))
+                .map(|(ep, dst)| {
+                    let mut regs = src_regs.clone();
+                    if let Some((sign, tag)) = ep.tagged() {
+                        regs[tag as usize] = sign.then_some(sim.offset);
+                    }
+
+                    (dst, regs)
+                });
+
+            stack.extend(dst_cfgs);
+        }
+
+        // only retain determined steps and final states
+        cfgs.retain(|(state, _)| !self.steps_from(state).is_empty() || state == accept);
+
+        Simulation {
+            offset: sim.offset,
+            configs: cfgs,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Tenfa<A> {
+    pub(crate) start: State,
+    pub(crate) accept: State,
+    pub(crate) tag_count: usize,
+    pub(crate) edges: Deltas<A>,
 }
 
 #[allow(dead_code)]
@@ -113,58 +386,43 @@ impl Simulation {
     }
 }
 
-impl<A: Hash + Eq> From<(State, A, State)> for Tenfa<A> {
-    fn from((start, symbol, accept): (State, A, State)) -> Self {
-        Self {
-            start,
-            accept,
-            tag_count: 0,
-            transitions: HashMap::from([(
-                start,
-                HashMap::from([(Edge::Step(symbol), HashSet::from([accept]))]),
-            )]),
-        }
-    }
-}
-
 impl<A: Hash + Eq + Clone> From<Regex<A>> for Tenfa<A> {
     fn from(regex: Regex<A>) -> Self {
-        let mut tenfa = Self::epsilon(State::gen());
+        let mut tenfa = Self::epsilon();
         tenfa.regex_extend(regex);
         tenfa
     }
 }
 
-impl<A: Hash + Eq + Clone> Tenfa<A> {
-    fn epsilon(accept: State) -> Self {
+impl<A> Tenfa<A> {
+    fn epsilon() -> Self {
+        let accept = State::gen();
         Self {
             start: accept,
             accept,
             tag_count: 0,
-            transitions: HashMap::new(),
+            edges: Deltas::new(),
         }
     }
+}
 
-    pub fn step(&self, simulation: Simulation, input: &A) -> Simulation {
-        Simulation {
-            offset: simulation.offset + 1,
-            configs: simulation
-                .configs
-                .into_iter()
-                .filter_map(|(src, rs)| {
-                    self.step_from(&src, input)
-                        .map(|dsts| dsts.into_iter().map(move |dst| (dst, rs.clone())))
-                })
-                .flatten()
-                .map(move |(state, rs)| (state.clone(), rs))
-                .collect::<Vec<(State, Vec<Register>)>>(),
+impl<A: Hash + Eq> Tenfa<A> {
+    pub(crate) fn as_ref(&self) -> Tenfa<&A> {
+        let Self { start, accept, tag_count, edges } = self;
+        Tenfa {
+            start: *start,
+            accept: *accept,
+            tag_count: *tag_count,
+            edges: edges.as_ref(),
         }
     }
+}
 
+impl<A: Hash + Eq + Clone> Tenfa<A> {
     fn regex_extend(&mut self, rx: Regex<A>) {
         match rx {
             Regex::Tag => self.extend_tag(),
-            Regex::Symbol(sym) => self.extend_step(sym),
+            Regex::Symbol(sym) => self.extend_deter(sym),
             Regex::Sequence(lhs, rhs) => self.regex_extend_seq(*lhs, *rhs),
             Regex::Alternative(lhs, rhs) => self.regex_extend_alt(*lhs, *rhs),
             Regex::Repetition(rx, low, count) => self.regex_extend_rep(*rx, low, count),
@@ -174,18 +432,6 @@ impl<A: Hash + Eq + Clone> Tenfa<A> {
     fn regex_extend_rep(&mut self, rx: Regex<A>, low: usize, count: Option<usize>) {
         match (low, count) {
             (0, Some(0)) => panic!("optional never"),
-            (low @ 2.., count) => {
-                self.regex_extend_rep(rx.clone(), low - 1, count);
-                self.regex_extend(rx);
-            },
-            (1, Some(0)) => self.regex_extend(rx),
-            (1, Some(count @ 1..)) => {
-                // if m == 1 then ?
-                let accept = self.start;
-                self.regex_extend_rep(rx.clone(), 1, Some(count - 1));
-                self.binary_epsilon_branch(accept, self.start);
-                self.regex_extend(rx);
-            },
             (0, m) => {
                 let accept = self.start;
                 let accept_tag_count = self.tag_count;
@@ -200,12 +446,24 @@ impl<A: Hash + Eq + Clone> Tenfa<A> {
 
                 self.binary_epsilon_branch(rx_start, ntags_start);
             },
+            (1, Some(0)) => self.regex_extend(rx),
+            (1, Some(count @ 1..)) => {
+                // if m == 1 then ?
+                let accept = self.start;
+                self.regex_extend_rep(rx.clone(), 1, Some(count - 1));
+                self.binary_epsilon_branch(accept, self.start);
+                self.regex_extend(rx);
+            },
             (1, None) => {
                 // +
-                self.extend_edge(Edge::Epsilon(None));
+                self.extend_edge(Edge::new_epsilon(1));
                 let accept = self.start;
                 self.regex_extend(rx);
-                self.extend_transitions_once((accept, Edge::Epsilon(None), self.start));
+                self.edges.extend_one((accept, Edge::new_epsilon(0), self.start));
+            },
+            (low @ 2.., count) => {
+                self.regex_extend_rep(rx.clone(), low - 1, count);
+                self.regex_extend(rx);
             },
             _ => unreachable!(),
         }
@@ -216,251 +474,150 @@ impl<A: Hash + Eq + Clone> Tenfa<A> {
         self.regex_extend(lhs);
     }
 
-    fn regex_extend_alt(&mut self, lhs: Regex<A>, rhs: Regex<A>) {
+    fn regex_extend_alt(&mut self, right: Regex<A>, left: Regex<A>) {
         let accept = self.start;
         let accept_tag_count = self.tag_count;
 
-        self.regex_extend(lhs);
-        let lhs_start = self.start;
-        let lhs1_tag_count = self.tag_count;
+        self.regex_extend(left);
+        let left_start = self.start;
+        let left_tag_count = self.tag_count;
 
         self.start = accept;
-        self.negative_tags_extend(accept_tag_count..lhs1_tag_count);
-        self.regex_extend(rhs);
-        let rhs_start = self.start;
-        let lhs2_tag_count = self.tag_count;
+        self.negative_tags_extend(accept_tag_count..left_tag_count);
+        self.regex_extend(right);
+        let right_start = self.start;
+        let right_tag_count = self.tag_count;
 
-        self.start = lhs_start;
-        self.negative_tags_extend(lhs1_tag_count..lhs2_tag_count);
+        self.start = left_start;
+        self.negative_tags_extend(left_tag_count..right_tag_count);
 
-        self.binary_epsilon_branch(rhs_start, self.start);
+        self.binary_epsilon_branch(right_start, self.start);
     }
 
-    fn extend_step(&mut self, sym: A) {
-        self.extend_edge(Edge::Step(sym));
+    fn extend_deter(&mut self, sym: A) {
+        self.extend_edge(Edge::Deter(sym));
     }
 
     fn extend_tag(&mut self) {
-        self.extend_edge(Edge::Epsilon(Some((true, self.tag_count))));
+        self.extend_edge(Edge::new_tag(true, self.tag_count));
         self.tag_count += 1;
     }
 
     fn extend_edge(&mut self, edge: Edge<A>) {
         let start = State::gen();
-        self.extend_transitions_once((start, edge, self.start));
+        self.edges.extend_one((start, edge, self.start));
         self.start = start;
-    }
-
-    fn extend_transitions<I>(&mut self, other: I)
-    where
-        I: IntoIterator<Item = (State, HashMap<Edge<A>, HashSet<State>>)>,
-    {
-        for (src, steps) in other {
-            let transitions = self.transitions.entry(src).or_default();
-            for (edge, dsts) in steps {
-                transitions.entry(edge).or_default().extend(dsts);
-            }
-        }
-    }
-
-    fn extend_transitions_once(&mut self, (src, edge, dst): (State, Edge<A>, State)) {
-        self.transitions
-            .entry(src)
-            .or_default()
-            .entry(edge)
-            .or_default()
-            .insert(dst);
     }
 
     fn binary_epsilon_branch(&mut self, lhs: State, rhs: State) {
         self.start = State::gen();
-        self.extend_transitions_once((self.start, Edge::Epsilon(None), rhs));
-        self.extend_transitions_once((self.start, Edge::Epsilon(None), lhs));
+        self.edges
+            .extend_one((self.start, Edge::new_epsilon(0), rhs));
+        self.edges
+            .extend_one((self.start, Edge::new_epsilon(1), lhs));
     }
 
     fn negative_tags_extend(&mut self, tag_range: Range<usize>) {
         for tag in tag_range {
-            self.extend_edge(Edge::Epsilon(Some((false, tag))))
+            self.extend_edge(Edge::new_tag(false, tag))
         }
-    }
-
-    pub fn epsilon_closure(&self, simulation: Simulation) -> Simulation {
-        let mut stack = simulation.configs;
-        stack.reverse();
-
-        let mut configs = Vec::new();
-
-        while let Some((src, mut rs)) = stack.pop() {
-            configs.push((src, rs.clone()));
-
-            let epsilons = self
-                .iter_epsilons_from(&src)
-                .flat_map(|(tag, dsts)| dsts.into_iter().map(move |dst| (tag, dst)));
-
-            for (tag, dst) in epsilons {
-                match tag {
-                    Some((true, tag)) => rs[tag as usize] = Some(simulation.offset),
-                    Some((false, tag)) => rs[tag as usize] = None,
-                    _ => {},
-                }
-
-                if configs.iter().all(|(state, _)| state != dst) {
-                    stack.push((*dst, rs.clone()))
-                }
-            }
-        }
-
-        // only retain determined steps and final states
-        configs.retain(|(state, _)| !self.steps_from(state).is_empty() || state == &self.accept);
-
-        Simulation {
-            offset: simulation.offset,
-            configs,
-        }
-    }
-
-    fn step_from(&self, state: &State, symbol: &A) -> Option<&HashSet<State>> {
-        self.steps_from(state).get(symbol).copied()
-    }
-
-    fn steps_from(&self, state: &State) -> HashMap<&A, &HashSet<State>> {
-        self.transitions
-            .get(state)
-            .into_iter()
-            .flatten()
-            .filter_map(|(edge, dsts)| {
-                if let Edge::Step(symbol) = edge {
-                    Some((symbol, dsts))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn iter_epsilons_from(
-        &self,
-        state: &State,
-    ) -> impl Iterator<Item = (Option<(bool, usize)>, &HashSet<State>)> {
-        self.transitions
-            .get(state)
-            .into_iter()
-            .flatten()
-            .filter_map(|(edge, dsts)| {
-                if let Edge::Epsilon(tag) = edge {
-                    Some((tag.as_ref().copied(), dsts))
-                } else {
-                    None
-                }
-            })
     }
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
+ // use std::io::{Write, self};
     use std::{fmt::Display, hash::Hash};
 
-    use super::regex_test as regex;
-    use super::Tenfa;
+    use super::{
+        regex_test as regex,
+        Tenfa, Deltas, State, Delta,
+    };
 
-    #[test]
-    fn number() {
-        let tenfa = regex::number().into();
-        print_tenfa(&tenfa);
+    macro_rules! print_style {
+        ($start:expr, $goal:expr) => {{
+            println!(
+                concat!(
+                    r#"    start -> {:?}"#, "\n",
+                    r#"    {} [ shape = doublecircle ]"#, "\n",
+                ),
+                $start,
+                $goal,
+            )
+        }}
     }
 
-    #[test]
-    fn re2c_paper() {
-        let tenfa = regex::re2c_paper().into();
-        print_tenfa(&tenfa);
+    macro_rules! print_prelude {
+        () => {{
+            println!(
+                concat!(
+                    r#"digraph G {{"#, "\n",
+                    r#"    rankdir = LR;"#, "\n",
+                    r#"    node [ shape = circle ];"#, "\n",
+                    r#"    edge [ weight = 2 ];"#, "\n",
+                    r#"    node [ width = 0.3 ];"#, "\n",
+                    r#"    edge [ weight = 2 ];"#, "\n",
+                    r#"    root = start;"#, "\n",
+                    r#"    start [ shape = none, label = "" ];"#, "\n",
+                ),
+            );
+        }};
     }
 
-    #[test]
-    fn wikipedia() {
-        let tenfa = regex::wikipedia().into();
-        print_tenfa(&tenfa);
-    }
-
-    pub(crate) fn print_tenfa<A: Hash + Eq + Clone + Display>(enfa: &Tenfa<A>) {
-        use super::State;
-        let mut todo = Vec::from([&enfa.start]);
-        let mut visited: Vec<&State> = Vec::new();
-
-        print!(
-            r#"
-              digraph G {{
-                  rankdir = TB;
-                  node [ shape = circle ];
-                  edge [ weight = 2 ];
-                  node [ width = 0.3 ];
-                  edge [ weight = 2 ];
-                  root = start;
-                  start [ shape = none, label = "" ];
-                  start -> {:?}
-                  {} [ shape = doublecircle ]
-            "#,
-            enfa.start, enfa.accept
-        );
-
-        use super::Edge;
-        fn format_transition<A: Hash + Eq + Clone + Display>(
-            src: State,
-            edge: Edge<A>,
-            dst: State,
-        ) {
-            match edge {
-                Edge::Step(sym) => {
-                    println!(r#"    {src} -> {dst} [label = "{sym}" color = "blue4"];"#);
-                },
-                Edge::Epsilon(Some((sign, tag))) => {
+    pub(crate) fn print_deltas<A: Hash + Eq + Clone + Display>(
+        edges: &Deltas<A>,
+        start: &State,
+    ) {
+        fn format_delta<A: Hash + Eq + Clone + Display>((src, edge, dst): Delta<A>) {
+            use super::{Edge, Epsilon};
+            let (label, color) = match edge {
+                Edge::Deter(sym) => (format!(r#""{sym}""#), "blue4"),
+                Edge::Epsilon(Epsilon::Epsilon(pre)) => (format!(r#""{pre}/ε""#), "cyan3"),
+                Edge::Epsilon(Epsilon::Tagged(sign, tag)) => {
                     let sign = if sign { "+" } else { "-" };
-                    println!(r#"    {src} -> {dst} [label = "{sign}{tag}" color = "green"];"#);
+                    (format!("<<i>{sign}t<sub>{tag}</sub></i>>"), "green")
                 },
-                Edge::Epsilon(None) => {
-                    println!(r#"    {src} -> {dst} [color = "cyan3"];"#);
-                },
-            }
+            };
+            let style = format!(r#"label = {label}, color = "{color}""#);
+            println!("    {src} -> {dst} [ {style} ];");
         }
 
-        while let Some(src) = todo.pop() {
-            if visited.contains(&src) {
-                continue;
-            } else {
-                visited.push(src);
-            }
+        let mut graph = edges.as_ref();
+        graph.drain_traverse(start).for_each(format_delta);
 
-            let transitions = enfa
-                .transitions
-                .get(src)
-                .into_iter()
-                .flatten()
-                .flat_map(|(edge, dsts)| dsts.into_iter().map(move |dst| (edge, dst)));
-
-            for (edge, dst) in transitions {
-                format_transition(*src, edge.clone(), *dst);
-                todo.push(dst);
-            }
-        }
-
-        let transitions = enfa
-            .transitions
-            .clone()
+        let mut unvisited = graph
+            .into_set()
             .into_iter()
-            .flat_map(|(src, steps)| steps.into_iter().map(move |(edge, dsts)| (src, edge, dsts)))
-            .flat_map(|(src, edge, dsts)| {
-                dsts.into_iter().map(move |dst| (src, edge.clone(), dst))
-            });
+            .peekable();
 
-        let unvisited =
-            transitions.filter(|(src, _, dst)| !visited.contains(&src) || !visited.contains(&dst));
-        let mut unvisited = unvisited.peekable();
         if let Some(_) = unvisited.peek() {
-            println!("// UNVISITED");
-            while let Some((src, edge, dst)) = unvisited.next() {
-                format_transition(src, edge, dst);
-            }
+            println!("    // UNVISITED");
+            unvisited.for_each(format_delta)
         }
+    }
 
+    pub(crate) fn number() -> Tenfa<char> {
+        regex::number().into()
+    }
+
+    pub(crate) fn re2c_paper() -> Tenfa<char> {
+        regex::re2c_paper().into()
+    }
+
+    pub(crate) fn wikipedia() -> Tenfa<char> {
+        regex::wikipedia().into()
+    }
+
+    #[test]
+    fn print_re2c_paper() {
+        let tenfa = Tenfa::from(re2c_paper());
+        print(&tenfa);
+    }
+
+    pub(crate) fn print<A: Hash + Eq + Clone + Display>(tenfa: &Tenfa<A>) {
+        print_prelude!();
+        print_style!(tenfa.start, tenfa.accept);
+        print_deltas(&tenfa.edges, &tenfa.start);
         println!(r#"}}"#);
     }
 }

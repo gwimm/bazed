@@ -6,10 +6,7 @@ use std::{
     iter::Extend,
 };
 
-use crate::{
-    common::Id,
-    regex::Regex,
-};
+use crate::{common::Id, regex::Regex};
 
 type State = Id;
 type EdgeId = Id;
